@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+env/
+
+# Local analysis data and generated outputs
+Analyses/
+*.tif
+*.tiff
+
+# Local editor and operating-system files
+.DS_Store
+.vscode/
+
+# Node dependencies and generated workbook previews
+node_modules/
+npm-debug.log*
