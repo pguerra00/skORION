@@ -19,6 +19,7 @@ from scipy import ndimage as ndi
 import skimage
 from skimage import measure, morphology, segmentation
 import tifffile
+from image_io import read_image, inspect_image, validate_rgb_channel_order, validate_pixel_size
 
 
 def mad(a):
@@ -32,25 +33,6 @@ def json_clean(obj):
     if isinstance(obj,np.ndarray): return obj.tolist()
     if isinstance(obj,np.generic): return obj.item()
     return obj
-
-
-def read_image(path):
-    with tifffile.TiffFile(path) as tf:
-        arr=tf.asarray()
-        ij=dict(tf.imagej_metadata or {})
-        ij.pop('LUTs',None)
-        page=tf.pages[0]
-        xres=page.tags['XResolution'].value
-        yres=page.tags['YResolution'].value
-        if ij.get('unit') not in ['micron','um','µm']:
-            raise ValueError('Unknown spatial calibration: require explicit unit before calibrated analysis')
-        sx=xres[1]/xres[0];sy=yres[1]/yres[0]
-        if arr.ndim!=3 or tf.series[0].axes!='CYX':
-            raise ValueError(f'Expected a multichannel 2D CYX image: {path.name}')
-        metadata={'axes':tf.series[0].axes,'shape':list(arr.shape),'dtype':str(arr.dtype),
-                  'bit_depth':arr.dtype.itemsize*8,'pixel_size_x_um':sx,'pixel_size_y_um':sy,
-                  'imagej_metadata':ij,'page_count':len(tf.pages)}
-    return arr,metadata
 
 
 def validate_group_names(group_names):
@@ -68,7 +50,7 @@ def metadata_row(path,idx,md,group_names=None):
     name=path.name
     # Preserve the original pilot parser when no group names are configured.
     prefix='63x_TP53KO_488_gH2AX_59453BP1_siCon_'
-    tail=name.removeprefix(prefix)
+    tail=path.stem.removeprefix(prefix)
     parts=tail.split('_2026-08-13_')
     group=parts[0] if name.startswith(prefix) and len(parts)==2 else 'AMBIGUOUS'
     if group not in ['20PDS','100MMC','ART558_20PDS']: group='AMBIGUOUS'
@@ -89,10 +71,15 @@ def metadata_row(path,idx,md,group_names=None):
             'objective_from_filename':'63x' if legacy else None,
             'treatment_token':group,'dose_units':'not specified; filename tokens retained verbatim',
             'acquisition_date_from_filename':'2026-08-13' if legacy and len(parts)==2 else None,
-            'acquisition_time_from_filename':parts[1].replace('_MAX.tif','') if len(parts)==2 else None,
-            'projection':'2D MAX projection (filename + CYX TIFF)',
+            'acquisition_time_from_filename':parts[1].removesuffix('_MAX') if len(parts)==2 else None,
+            'projection':'2D RGB export; projection not inferred' if md.get('input_format')=='rgb_export' else '2D MAX projection (filename + CYX TIFF)',
             'width_px':md['shape'][2],'height_px':md['shape'][1],'n_channels':md['shape'][0],
             'z_planes_in_file':1,'timepoints_in_file':1,'bit_depth':md['bit_depth'],'dtype':md['dtype'],
+            'input_format':md.get('input_format','channel_stack'),
+            'source_axes':md.get('source_axes','CYX'),
+            'rgb_channel_order':json.dumps(md.get('rgb_channel_order')),
+            'calibration_source':md.get('calibration_source','ImageJ micron unit and TIFF resolution'),
+            'saturation_value':md.get('saturation_value',65535),
             'pixel_size_x_um':md['pixel_size_x_um'],'pixel_size_y_um':md['pixel_size_y_um'],
             'stored_z_spacing_um_not_used':md['imagej_metadata'].get('spacing'),
             'group_mapping_status':status}
@@ -218,7 +205,7 @@ def describe_vals(vals,prefix):
             prefix+'integrated_adu_px':float(np.sum(vals))}
 
 
-def focus_measurements(labels,raw,bg,extras,nuc,origin,nuclear_centroid,sx,sy):
+def focus_measurements(labels,raw,bg,extras,nuc,origin,nuclear_centroid,sx,sy,saturation_value=65535):
     rows=[]
     edge_dist=ndi.distance_transform_edt(nuc,sampling=(sy,sx))
     for r in measure.regionprops(labels):
@@ -250,7 +237,7 @@ def focus_measurements(labels,raw,bg,extras,nuc,origin,nuclear_centroid,sx,sy):
              'focus_to_background_ratio':float(rawvals.mean()/loc) if loc>0 else np.nan,
              'local_signal_to_background_ratio':float((rawvals.mean()-loc)/loc) if loc>0 else np.nan,
              'local_contrast_snr':float((rawvals.mean()-loc)/lsig) if lsig>0 else np.nan,
-             'saturated_pixels':int(np.count_nonzero(rawvals==65535))}
+             'saturated_pixels':int(np.count_nonzero(rawvals==saturation_value))}
         rows.append(row)
     return rows
 
@@ -313,11 +300,15 @@ def select_channels(p,nuclear_channel=None,foci_channels=None):
 
 def main():
     ap=argparse.ArgumentParser()
-    ap.add_argument('--input-dir',type=Path,required=True,help='Folder containing the raw TIFF images')
+    ap.add_argument('--input-dir',type=Path,required=True,help='Folder containing raw .tif or .tiff images (case-insensitive)')
     ap.add_argument('--output-dir',type=Path,help='Analysis folder; default: a new dated folder under ./Analyses/')
     ap.add_argument('--parameters',type=Path,required=True,help='Parameters for this experiment; start from parameters.template.json')
     ap.add_argument('--nuclear-channel',type=int,help='One-based nuclear channel (default: parameters JSON or 1)')
     ap.add_argument('--foci-channels',type=int,nargs='+',help='One or more one-based foci channels, e.g. 2 3 (default: parameters JSON or 2 3)')
+    ap.add_argument('--rgb-channel-order',nargs=3,choices=['red','green','blue'],
+                    help='RGB color assigned to channels 1, 2, and 3; e.g. blue green red (required for RGB TIFFs)')
+    ap.add_argument('--pixel-size-um',type=float,nargs=2,metavar=('X','Y'),
+                    help='Explicit X and Y pixel sizes in µm per pixel; overrides stored calibration')
     ap.add_argument('--qc-output',choices=['off','minimal','detailed'],default='off',
                     help='Automatically generate QC, plots and reports: minimal omits native overlays and nucleus crops; detailed includes them (default: off)')
     args=ap.parse_args();out=args.output_dir
@@ -326,21 +317,28 @@ def main():
     try:
         nuclear_channel,foci_channels=select_channels(p,args.nuclear_channel,args.foci_channels)
         validate_group_names(p.get('group_names',[]))
+        p['rgb_channel_order']=validate_rgb_channel_order(args.rgb_channel_order if args.rgb_channel_order is not None else p.get('rgb_channel_order'))
+        p['pixel_size_um']=validate_pixel_size(args.pixel_size_um if args.pixel_size_um is not None else p.get('pixel_size_um'))
     except ValueError as exc:
         ap.error(str(exc))
     p['nuclear_channel']=nuclear_channel;p['foci_channels']=foci_channels;p['qc_output']=args.qc_output
     marker=lambda c:p.get('channels',{}).get(str(c),f'Channel {c}')
-    files=sorted(args.input_dir.glob('*.tif'))
+    # macOS external drives include ._ AppleDouble companions, not image data.
+    files=sorted(path for path in args.input_dir.iterdir()
+                 if not path.name.startswith('._') and path.is_file()
+                 and path.suffix.lower() in {'.tif','.tiff'})
     if not files:raise ValueError('No TIFF images found')
     # Check nuclear and foci channel availability in every image before writing outputs.
     for path in files:
-        with tifffile.TiffFile(path) as tf:
-            series=tf.series[0]
-            if series.axes!='CYX' or len(series.shape)!=3:
-                ap.error(f'{path.name}: expected a multichannel 2D CYX image')
+        try:
+            md=inspect_image(path,p)
             for c in [nuclear_channel,*foci_channels]:
-                if c>series.shape[0]:
-                    ap.error(f'{path.name}: channel {c} is unavailable; image has {series.shape[0]} channels')
+                if c>md['shape'][0]:
+                    ap.error(f"{path.name}: channel {c} is unavailable; image has {md['shape'][0]} channels")
+        except tifffile.TiffFileError as exc:
+            ap.error(f'{path.name}: not a readable TIFF image ({exc})')
+        except ValueError as exc:
+            ap.error(f'{path.name}: {exc}')
     if out is None:
         analyses=Path.cwd()/'Analyses';analyses.mkdir(exist_ok=True)
         label=re.sub(r'[^A-Za-z0-9_-]+','_',args.input_dir.resolve().name).strip('_') or 'analysis'
@@ -359,7 +357,8 @@ def main():
     mapping=[];cells=[];foci=[];nucaudit=[];focaudit=[];qc=[];intensity=[];sensitivity=[];metadata={};thresholds=[]
     for idx,path in enumerate(files,1):
         print(f'\nAnalyzing image {idx}/{len(files)}: {path.name}',flush=True)
-        arr,md=read_image(path);m=metadata_row(path,idx,md,p.get('group_names'));mapping.append(m);metadata[m['image_id']]=md
+        arr,md=read_image(path,p);m=metadata_row(path,idx,md,p.get('group_names'));mapping.append(m);metadata[m['image_id']]=md
+        saturation_value=md['saturation_value'] if md['saturation_value'] is not None else np.inf
         if m['treatment_group']=='AMBIGUOUS':
             print(f'  Group warning: {m["group_mapping_status"]}',flush=True)
         sx,sy=md['pixel_size_x_um'],md['pixel_size_y_um'];pixel_area=sx*sy
@@ -393,7 +392,7 @@ def main():
             a=arr[c-1]
             histrow={**ids,'channel':c,'marker':marker(c),'mean_adu':float(a.mean()),'std_adu':float(a.std()),
                      'observed_max_adu':int(a.max()),'observed_max_pixel_pct':float((a==a.max()).mean()*100),
-                     'saturated_pixel_pct':float((a==65535).mean()*100)}
+                     'saturated_pixel_pct':float((a==saturation_value).mean()*100)}
             for q in [0,1,10,25,50,75,90,95,99,99.5,99.9,100]:histrow[f'p{q}_adu']=float(np.percentile(a,q))
             intensity.append(histrow)
         for c in foci_channels:
@@ -413,7 +412,7 @@ def main():
                 nid=f"{m['image_id']}_N{nr.label:03d}"
                 thresholds.append({**ids,'nucleus_id':nid,'channel':c,**th})
                 for r in fa:focaudit.append({**ids,'nucleus_id':nid,'channel':c,**r})
-                fr=focus_measurements(lab,raw[sl],bg[sl],extra,nm,(y0,x0),nr.centroid,sx,sy)
+                fr=focus_measurements(lab,raw[sl],bg[sl],extra,nm,(y0,x0),nr.centroid,sx,sy,saturation_value)
                 for r in fr:
                     loc=r.pop('local_focus_label');global_label+=1
                     output_mask[sl][lab==loc]=global_label
@@ -443,8 +442,8 @@ def main():
                 'background_std_adu':float(raw[outside].std()),
                 'nuclear_background_model_median_adu':float(np.median(bg[usable>0])),
                 'signal_to_background_ratio':median('focus_to_background_ratio'),'median_local_contrast_snr':median('local_contrast_snr'),
-                'percent_saturated_pixels_image':float((raw==65535).mean()*100),
-                'percent_saturated_pixels_usable_nuclei':float((raw[usable>0]==65535).mean()*100),
+                'percent_saturated_pixels_image':float((raw==saturation_value).mean()*100),
+                'percent_saturated_pixels_usable_nuclei':float((raw[usable>0]==saturation_value).mean()*100),
                 'median_focus_intensity_adu':median('raw_mean_adu'),'median_focus_area_um2':median('focus_area_um2'),
                 'p95_focus_area_um2':float(ff.focus_area_um2.quantile(.95)) if len(ff) else np.nan,
                 'median_foci_per_nucleus':float(np.median(counts)),'number_detected_foci':len(imagef),
@@ -545,6 +544,9 @@ def main():
          'skimage':skimage.__version__,'pandas':pd.__version__,'tifffile':tifffile.__version__,
          'run_utc':datetime.now(timezone.utc).isoformat(),'input_images':len(files),'nuclei_analyzed':len(dfc),
          'nuclear_channel':nuclear_channel,'foci_channels':foci_channels,'qc_output':args.qc_output,
+         'rgb_channel_order':p.get('rgb_channel_order'),
+         'pixel_size_um':p.get('pixel_size_um'),
+         'image_reader_sha256':hashlib.sha256(Path(__file__).with_name('image_io.py').read_bytes()).hexdigest(),
          **{f'channel_{c}_foci':int((dff.channel==c).sum()) for c in foci_channels},
          'raw_sha256_rechecked_unchanged':True,'parameters_sha256':hashlib.sha256(parameter_bytes).hexdigest(),
          'output_directory':str(out),'input_directory':str(args.input_dir.resolve()),

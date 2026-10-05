@@ -1,8 +1,54 @@
 # Selecting channels in analyze_foci
 
 Channel numbers start at **1** and refer to the channel planes in the TIFF. The
-input must be a calibrated, multichannel 2D ImageJ TIFF in CYX order. The number
-of channels is no longer restricted to three.
+input can be a calibrated, multichannel 2D ImageJ TIFF in CYX order or an RGB
+TIFF with an explicit color mapping. Channel stacks are not restricted to three.
+
+## RGB TIFF exports (including EVOS)
+
+For blue nuclei, green γH2AX, and red RAD51, add this option to analysis:
+
+```sh
+python analyze_foci.py --input-dir /path/to/tiffs --parameters /path/to/parameters.json --output-dir /path/to/results --rgb-channel-order blue green red --qc-output detailed
+```
+
+This assigns C1 = blue, C2 = green, and C3 = red. Alternatively save
+`"rgb_channel_order": ["blue", "green", "red"]` in the experiment parameters.
+Each color must appear exactly once; the program does not guess stain identity.
+Plotting and validation reuse the saved mapping automatically. The option has
+no effect on existing CYX stacks.
+
+RGB exports must contain one 2D image with exactly three color components and
+physical calibration in OME metadata, ImageJ micron metadata, TIFF inch/centimeter
+resolution tags, or an explicit pixel-size override. EVOS files with physical resolution tags are supported.
+macOS `._` companions are ignored. Keep `image_io.py` beside the other scripts.
+
+Stored component values keep their native dtype and range: 8-bit RGB stays
+0–255. Threshold floors apply on that scale; saturation/clipping is counted
+at 255 for uint8 and 65535 for uint16. RGB export values can reflect display
+adjustments and do not recover original detector measurements. Review the
+segmentation QC and treat RGB results as exploratory. Source layout, mapping,
+bit depth, calibration, and this limitation are recorded in the generated outputs.
+
+## Pixel calibration
+
+Pixel sizes are read in this order: an explicit override, OME `PhysicalSizeX`
+and `PhysicalSizeY` (converted to µm), ImageJ micron metadata, then TIFF
+inch/centimeter resolution. Missing OME physical-size units default to µm
+according to the [OME schema](https://www.openmicroscopy.org/Schemas/Documentation/Generated/OME-2016-06/ome_xsd.html).
+A file with no physical calibration requires
+pixel sizes from the original acquisition settings; objective magnification
+alone is insufficient.
+
+Supply both X and Y sizes with `--pixel-size-um X Y` (µm per pixel), or save
+`"pixel_size_um": [X, Y]` in the parameters JSON. Replace X and Y with actual
+positive numbers; use the same value twice for square pixels. This explicitly
+overrides stored calibration for every image in that run. The applied scale
+and its source are recorded in the image mapping, metadata, and run parameters.
+OME channel stacks use the stored plane order; the RGB option only applies to
+RGB exports.
+
+## Selecting planes
 
 From the Foci_Analysis folder, analyze only channel 2 using channel 1 for nuclei:
 

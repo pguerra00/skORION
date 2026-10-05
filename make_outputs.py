@@ -15,6 +15,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from channel_config import add_channel_arguments, resolve_channels, check_channel_inputs, marker_name, selected_columns
+from image_io import read_channels
 
 GROUPS=['20PDS','100MMC','ART558_20PDS']
 LABELS=['20PDS','100MMC','ART558 + 20PDS']
@@ -81,7 +82,7 @@ def make_shared_contrast(qdir,mapping,p):
         # Copy only sampled pixels so the views cannot retain full TIFF stacks.
         samples=[]
         for path in mapping.source_path:
-            raw=tifffile.imread(path)
+            raw=read_channels(path,p)
             samples.append(raw[c-1,::4,::4].ravel().copy())
             del raw
         sample=np.concatenate(samples)
@@ -96,7 +97,7 @@ def make_shared_contrast(qdir,mapping,p):
             try:
                 for ax in axs.flat:ax.axis('off')
                 for ax,(_,m) in zip(axs.flat,fields.iterrows()):
-                    raw=tifffile.imread(m.source_path)
+                    raw=read_channels(m.source_path,p)
                     ax.imshow(raw[c-1],cmap='gray',vmin=lim[0],vmax=lim[1])
                     del raw
                     ax.set_title(f'{m.treatment_group} · {m.image_id}')
@@ -117,7 +118,7 @@ def make_qc(out,mapping,cell,focus,p):
     rows=[(p['nuclear_channel'],'nuclear')]+[(c,'foci') for c in p['foci_channels']]
     print(f'QC: 0/{len(mapping)} images processed',flush=True)
     for index,(_,m) in enumerate(mapping.iterrows(),1):
-        im=m.image_id;raw=tifffile.imread(m.source_path);sx=m.pixel_size_x_um
+        im=m.image_id;raw=read_channels(m.source_path,p);sx=m.pixel_size_x_um
         nuc=tifffile.imread(out/'Masks'/f'{im}_nuclei.tif');alln=tifffile.imread(out/'Masks'/f'{im}_nuclei_all_candidates.tif')
         exc=np.where(nuc==0,alln,0)
         masks={c:tifffile.imread(out/'Masks'/f'{im}_C{c}_foci.tif') for c in p['foci_channels']}
@@ -148,7 +149,7 @@ def make_qc(out,mapping,cell,focus,p):
                     save_rgb(qdir/'Native_Overlays'/f'{im}_C{c}_labels.png',label_rgb(mask))
             for ax in axs[row]:ax.set_xticks([]);ax.set_yticks([])
             scale_bar(axs[row,0],sx)
-        fig.suptitle(f'{im} · {m.treatment_group} · {m.image_name}\n2D projection. Display scaling is for QC only; measurements use original 16-bit data.',fontsize=11)
+        fig.suptitle(f'{im} · {m.treatment_group} · {m.image_name}\n2D image. Display scaling is for QC only; measurements use stored pixel values.',fontsize=11)
         fig.savefig(qdir/f'{im}_Annotated_QC.png',dpi=260);plt.close(fig)
         # Per-nucleus paired raw/outline views include every usable nucleus.
         crops=cell[cell.image_id==im] if detailed else cell.iloc[:0]
@@ -281,8 +282,9 @@ def make_plots(out,cell,focus,image,p):
         fig,ax=plt.subplots(figsize=(9,5),layout='constrained')
         for j,g in enumerate(GROUPS):
             for _,m in mapping[mapping.treatment_group==g].iterrows():
-                a=tifffile.imread(m.source_path)[c-1]
-                bins=np.geomspace(max(1,a.min()),max(7500,a.max()+1),130)
+                a=read_channels(m.source_path,p)[c-1]
+                upper=256 if a.dtype==np.uint8 else max(7500,float(a.max())+1)
+                bins=np.geomspace(max(1,a.min()),upper,130)
                 ax.hist(a.ravel(),bins=bins,histtype='step',density=True,color=COLORS[j],label=f'{LABELS[j]} · {m.image_id}',lw=1.5)
         ax.set_xscale('log');ax.set_yscale('log');ax.set_xlabel('Raw pixel intensity (ADU)');ax.set_ylabel('Probability density');ax.legend();ax.set_title(f'Channel {c} · input intensity distributions\nAll image pixels before correction; same axes for treatments')
         figsave(fig,out/'QC',f'C{c}_Input_Intensity_Histogram')
@@ -308,7 +310,7 @@ def definition(col):
       'nucleus_label':'Integer object value in the nuclear label TIFF; IDs can have gaps after exclusions.',
       'focus_id':'Globally unique image, channel and focus label ID.',
       'focus_label':'Integer object value in that image/channel focus TIFF.',
-      'raw_integrated_adu_px':'Sum of original 16-bit pixel intensities over this focus.',
+      'raw_integrated_adu_px':'Sum of stored source pixel intensities over this focus. For RGB exports, values are color-component intensities.',
       'focus_to_background_ratio':'Mean original focus intensity / local background median.',
       'local_signal_to_background_ratio':'(Mean original focus intensity - local background median) / local background median.',
       'local_contrast_snr':'(Mean original focus intensity - local background median) / (1.4826 * MAD of local background pixels).',
@@ -342,7 +344,7 @@ def definition(col):
     if 'centroid' in s or 'distance' in s:return channel+'Unweighted geometric coordinate/distance; zero-based pixel centers, X column and Y row. Physical values use calibrated X/Y pixels.'
     if 'area' in s:return channel+s.replace('_',' ')+'. Area in px counts segmented pixels; um2 uses pixel_size_x_um * pixel_size_y_um. Zero-focus totals=0; per-focus summaries missing.'
     if 'integrated' in s or 'total_focus_intensity' in s:return channel+s.replace('_',' ')+'. Integrated intensity sums pixel values (ADU*pixel); per-nucleus totals include zero-focus nuclei as 0.'
-    if s.startswith('raw_'):return 'Statistic of original unsmoothed 16-bit intensities inside the focus; ADU.'
+    if s.startswith('raw_'):return 'Statistic of stored unsmoothed source intensities inside the focus; ADU columns contain color-component values for RGB exports.'
     return channel+s.replace('_',' ')+'. See Methods.md for definitions, units, nesting and missing-data conventions.'
 
 
@@ -374,12 +376,22 @@ def build_methods(out,p,mapping,images,cell,focus,qc):
     detailed_qc=('Nucleus_Crops contains every accepted nucleus. Native_Overlays retains displays at the original image dimensions.'
                  if p.get('qc_output','detailed')=='detailed' else
                  'Minimal QC was requested; separate native overlays and nucleus crops were not generated.')
+    rgb_inputs='input_format' in mapping and mapping.input_format.eq('rgb_export').any()
+    rgb_note=('RGB exports were explicitly mapped to channels in the order '+', '.join(p['rgb_channel_order'])+
+              '. Values are measured directly from the stored color components without rescaling. '
+              'These rendered intensities may reflect acquisition display settings and clipping; they do not recover original detector ADU. '
+              'Threshold floors use the stored pixel scale (0–255 for uint8), and RGB results should be treated as exploratory.'
+              if rgb_inputs else '')
+    rgb_option=' --rgb-channel-order '+' '.join(p['rgb_channel_order']) if rgb_inputs else ''
+    calibration_option=' --pixel-size-um '+' '.join(map(str,p['pixel_size_um'])) if p.get('pixel_size_um') else ''
     methods=f'''# Reproducible 2D nuclear foci quantification
 
 ## Scope and experimental units
 This report covers {len(mapping)} TIFF images, with foci measurements for {channels}. Nuclear segmentation uses {nuclear}. Channel identities come from the saved analysis parameters. Image IDs identify image observations, not biological replicates. Treatment tokens and replicate metadata are retained in Treatment_Group_Mapping.csv.
 
-Inputs contain calibrated 2D channel planes in CYX order. Channel counts, dimensions, pixel sizes, and source paths are recorded per image in Treatment_Group_Mapping.csv. Areas, axes and distances use both X and Y calibration. These scripts do not modify the raw TIFFs. Run_Manifest.json records the analysis selections; Output_Parameters.json records the selections included in this report.
+Inputs are read as calibrated 2D channel planes in CYX order. Source layout, channel mapping, bit depth, pixel sizes, calibration source, and source paths are recorded per image in Treatment_Group_Mapping.csv and Image_Metadata.json. RGB exports are reordered only when an explicit rgb_channel_order is supplied. Calibration priority is an explicit pixel_size_um override, then OME PhysicalSizeX/PhysicalSizeY, then ImageJ micron metadata, then TIFF inch/centimeter resolution. Areas, axes and distances use both X and Y calibration. These scripts do not modify the source TIFFs. Run_Manifest.json records the analysis selections; Output_Parameters.json records the selections included in this report.
+
+{rgb_note}
 
 Configured group_names use case-insensitive literal substring matching against the filename without its extension. Every matching name is retained in the group_names JSON-list column; treatment_group displays their combination. Without configured names, the legacy filename parser is used. Unmatched images remain AMBIGUOUS. Measurements and totals count each object once; comparison plots include it in every assigned group. Overlapping groups are not independent observations. number_images_in_treatment counts images with the same full combination of labels.
 
@@ -411,7 +423,7 @@ For each nucleus, per-focus intensity means and medians summarize the focus mean
 ## QC and sensitivity
 Annotated_QC figures show paired raw and overlay views plus label masks for each channel. {detailed_qc} Yellow marks counted foci, cyan accepted nuclear boundaries and red excluded candidates. TIFF mask values map exactly to the result label columns. Raw/overlay pairs share display limits; per-image QC contrast is for inspection only. Shared_Contrast figures use one range per channel across all images. Display clipping is distinct from detector saturation and does not change measurements.
 
-Saturation is defined as 65535, the uint16 container maximum. The exported files do not specify detector effective bit depth; absence of container saturation cannot prove absence of detector clipping. Observed maxima and their frequencies are in Input_Intensity_Distributions.csv. Observed maxima and saturation fractions should be reviewed in the saved QC tables.
+Saturation uses each input dtype's maximum stored value: 255 for uint8, 65535 for uint16. For RGB exports this measures clipping of exported color components, not detector saturation. The source files do not necessarily specify detector effective bit depth; absence of container saturation cannot prove absence of detector clipping. Per-image saturation values are in Treatment_Group_Mapping.csv. Observed maxima and saturation fractions should be reviewed in Input_Intensity_Distributions.csv and the saved QC tables.
 
 QC_Summary.csv reports fixed numerical and dataset-relative flags, with exact cutoffs in Output_Parameters.json. These include nuclear counts/exclusions, shape concerns, background, saturation, count extremes, size extremes, intensity tails, contrast, density and threshold sensitivity. Flags request inspection and never exclude images. Dataset-relative heuristics have limited reliability with few images. Genuine treatment biology can trigger a flag.
 
@@ -427,7 +439,7 @@ Use Python 3.12 and the pinned packages in requirements.txt. Run the commands be
 
 ```sh
 python -m pip install -r requirements.txt
-python analyze_foci.py --input-dir /path/to/raw_tiffs --parameters /path/to/analysis/Methods/parameters.json --output-dir /path/to/new_analysis
+python analyze_foci.py --input-dir /path/to/raw_tiffs --parameters /path/to/analysis/Methods/parameters.json --output-dir /path/to/new_analysis{rgb_option}{calibration_option}
 python make_outputs.py --output-dir /path/to/new_analysis --nuclear-channel {p['nuclear_channel']} --foci-channels {' '.join(map(str,p['foci_channels']))} --qc-output {p.get('qc_output','detailed')}
 python validate_results.py --output-dir /path/to/new_analysis --nuclear-channel {p['nuclear_channel']} --foci-channels {' '.join(map(str,p['foci_channels']))}
 ```
@@ -456,6 +468,8 @@ def report(out,mapping,images,cell,focus,qc,p):
 body{font:16px/1.55 system-ui,Arial;color:#203043;background:#f7f9fb;max-width:1250px;margin:auto;padding:35px}h1{font-size:32px}h2{margin-top:2.2em}a{color:#006b9c}table{border-collapse:collapse;background:white;width:100%;font-size:14px}th,td{padding:10px;border-bottom:1px solid #dbe2e9;text-align:left}th{background:#243c50;color:white}img{max-width:100%;height:auto}article{background:white;padding:22px;margin:18px 0;border:1px solid #dbe2e9;border-radius:8px}.note{border-left:4px solid #d69132;padding:12px 18px;background:#fff6e8}.gallery{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}.gallery img{width:100%}summary{cursor:pointer;font-weight:600}small{color:#526779}.links a{margin-right:18px}li{margin-bottom:7px}</style></head><body>'''
     body+=f'<h1>Fluorescent foci quantification</h1><p>{len(mapping)} images · {expand_groups(mapping).treatment_group.nunique()} groups · {len(cell)} usable nuclei · {esc(totals)}</p>'
     body+='<p class="note">All comparisons are descriptive. Nuclei and foci are nested within images. Detected objects and 2D areas require QC review; dense and faint signal remain sources of uncertainty.</p>'
+    if 'input_format' in mapping and mapping.input_format.eq('rgb_export').any():
+        body+='<p class="note">RGB export analysis: channels use the saved color mapping. Intensities are stored color-component values, not recovered detector ADU. Export display settings and clipping can affect measurements; treat these results as exploratory.</p>'
     if p.get('group_names'):
         body+='<p>Images appear in every matching group comparison. Groups can overlap; group counts must not be added as independent observations. The summary below shows each image once with its combined group labels.</p>'
     body+='<p class="links"><a href="Methods/Methods.md">Detailed methods</a><a href="Methods/Output_Parameters.json">Report parameters</a><a href="Methods/Treatment_Group_Mapping.csv">Image mapping</a><a href="QC/QC_Summary.csv">QC summary CSV</a></p>'

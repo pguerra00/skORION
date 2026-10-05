@@ -81,9 +81,10 @@ class DownstreamChannelTests(unittest.TestCase):
         methods=(out/'Methods/Methods.md').read_text()
         self.assertIn('Minimal QC was requested',methods)
         self.assertNotIn('Nucleus_Crops contains',methods)
-        for label in ['Analysis','QC']:
-            self.assertIn(f'{label}: 1/2 images processed; 1 remaining',self.analysis_result.stdout)
-            self.assertIn(f'{label}: 2/2 images processed; 0 remaining',self.analysis_result.stdout)
+        for index,name in enumerate(['field_siHELQ_MMC.tif','field_siHELQ_PDS.tif'],1):
+            self.assertIn(f'Analyzing image {index}/2: {name}',self.analysis_result.stdout)
+            self.assertIn(f'QC: {index}/2 images processed (I{index:02d})',self.analysis_result.stdout)
+        self.assertIn('Analysis complete: 2/2 images processed; 0 remaining',self.analysis_result.stdout)
         mapping=pd.read_csv(out/'Methods/Treatment_Group_Mapping.csv')
         self.assertEqual(mapping.group_names.map(json.loads).tolist(),[['siHELQ','MMC'],['siHELQ','PDS']])
         cells=pd.read_csv(out/'Results/Cell_Summary.csv')
@@ -101,7 +102,7 @@ class DownstreamChannelTests(unittest.TestCase):
         self.run_script('validate_results.py','--output-dir',out)
 
     def test_automatic_detailed_qc(self):
-        out=self.fixture(channels=(1,),qc_output='detailed')
+        out=self.fixture(channels=(1,),qc_output='detailed',filenames=('synthetic.TIF',))
         self.assertTrue((out/'QC/Native_Overlays/I01_C1_foci_outlines.png').exists())
         self.assertTrue((out/'QC/Native_Overlays/I01_C3_nuclear_outlines.png').exists())
         self.assertTrue((out/'QC/Nucleus_Crops/I01_N001.png').exists())

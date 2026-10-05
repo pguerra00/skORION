@@ -45,6 +45,13 @@ class ChannelSelectionTests(unittest.TestCase):
             self.assertEqual(metadata_row(legacy,1,md,[])['treatment_group'],'ART558_20PDS')
             # Explicit names override even a recognized legacy filename.
             self.assertEqual(metadata_row(legacy,1,md,['MMC'])['treatment_group'],'AMBIGUOUS')
+            for suffix in ['.tif','.TIF','.TiF','.tiff','.TIFF','.TiFf']:
+                path=legacy.with_suffix(suffix)
+                path.write_bytes(b'fixture')
+                row=metadata_row(path,1,md)
+                self.assertEqual(row['treatment_group'],'ART558_20PDS')
+                self.assertEqual(row['acquisition_time_from_filename'],'12')
+                self.assertEqual(row['image_name'],path.name)
         for invalid in [None,'MMC',{},[''],[' MMC'],[1],['MMC','mmc'],['AMBIGUOUS']]:
             with self.subTest(invalid=invalid),self.assertRaises(ValueError):
                 validate_group_names(invalid)
@@ -58,6 +65,74 @@ class ChannelSelectionTests(unittest.TestCase):
         for nuclear, foci in [(0, [2]), (1, []), (1, [2, 2]), (1, [-1]), (1, [1])]:
             with self.subTest(nuclear=nuclear, foci=foci), self.assertRaises(ValueError):
                 select_channels(PARAMETERS, nuclear, foci)
+
+    def test_tiff_extensions_are_case_insensitive(self):
+        data=np.zeros((2,64,64),dtype=np.uint16)
+        for suffixes in [('.TIF',),('.tif','.TIF','.TiF','.tiff','.TIFF','.TiFf')]:
+            with self.subTest(suffixes=suffixes),tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp)
+                inputs=root/'input';inputs.mkdir()
+                originals={}
+                for i,suffix in enumerate(suffixes):
+                    path=inputs/f'field_{i}{suffix}'
+                    tifffile.imwrite(path,data,imagej=True,resolution=(5,5),
+                                     metadata={'unit':'micron','axes':'CYX'})
+                    originals[path]=path.read_bytes()
+                    # External macOS drives include AppleDouble companions with
+                    # matching TIFF extensions but non-TIFF 00 05 16 07 headers.
+                    companion=inputs/f'._{path.name}'
+                    companion.write_bytes(b'\x00\x05\x16\x07'+b'\x00'*22)
+                    originals[companion]=companion.read_bytes()
+                # Unrelated files, TIFF-named directories, and subfolders are skipped.
+                (inputs/'notes.txt').write_text('not an image')
+                (inputs/'not_a_tiff.tif.bak').write_text('not an image')
+                nested=inputs/'nested.TIF';nested.mkdir()
+                (nested/'hidden.tif').write_text('not an image')
+                config=root/'parameters.json';config.write_text(json.dumps(PARAMETERS))
+                out=root/'output'
+                result=subprocess.run([sys.executable,str(SCRIPT),'--input-dir',str(inputs),
+                                       '--output-dir',str(out),'--parameters',str(config),
+                                       '--foci-channels','2'],capture_output=True,text=True)
+                self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+                mapping=pd.read_csv(out/'Methods/Treatment_Group_Mapping.csv')
+                paths=sorted(path for path in originals if not path.name.startswith('._'))
+                self.assertEqual(mapping.image_name.tolist(),[path.name for path in paths])
+                self.assertEqual(mapping.source_path.tolist(),[str(path.resolve()) for path in paths])
+                self.assertEqual(len(pd.read_csv(out/'Results/Image_Summary.csv')),len(paths))
+                self.assertIn(f'Analysis complete: {len(paths)}/{len(paths)} images processed; 0 remaining',result.stdout)
+                for path,content in originals.items():
+                    self.assertEqual(path.read_bytes(),content)
+
+    def test_invalid_tiff_reports_filename(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            inputs=root/'input';inputs.mkdir()
+            (inputs/'broken.TIF').write_bytes(b'not a TIFF')
+            config=root/'parameters.json';config.write_text(json.dumps(PARAMETERS))
+            out=root/'output'
+            result=subprocess.run([sys.executable,str(SCRIPT),'--input-dir',str(inputs),
+                                   '--output-dir',str(out),'--parameters',str(config)],
+                                  capture_output=True,text=True)
+            self.assertNotEqual(result.returncode,0)
+            self.assertIn('broken.TIF: not a readable TIFF image',result.stderr)
+            self.assertNotIn('Traceback',result.stderr)
+            self.assertFalse(out.exists())
+
+    def test_rgb_export_reports_format_requirement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            inputs=root/'input';inputs.mkdir()
+            tifffile.imwrite(inputs/'rgb.TIF',np.zeros((64,64,3),dtype=np.uint8),photometric='rgb')
+            config=root/'parameters.json';config.write_text(json.dumps(PARAMETERS))
+            out=root/'output'
+            result=subprocess.run([sys.executable,str(SCRIPT),'--input-dir',str(inputs),
+                                   '--output-dir',str(out),'--parameters',str(config)],
+                                  capture_output=True,text=True)
+            self.assertNotEqual(result.returncode,0)
+            self.assertIn('rgb.TIF: RGB TIFF export',result.stderr)
+            self.assertIn('--rgb-channel-order',result.stderr)
+            self.assertNotIn('Traceback',result.stderr)
+            self.assertFalse(out.exists())
 
     def test_channel_routing_and_empty_results(self):
         yy, xx = np.mgrid[:128, :128]
@@ -89,7 +164,7 @@ class ChannelSelectionTests(unittest.TestCase):
                 return output, result
 
             baseline, result = run('baseline', original)
-            self.assertIn('Analysis: 1/1 images processed; 0 remaining',result.stdout)
+            self.assertIn('Analysis complete: 1/1 images processed; 0 remaining',result.stdout)
             self.assertFalse((baseline / 'Review.html').exists())
             self.assertFalse((baseline / 'QC/Native_Overlays').exists())
             basecells = pd.read_csv(baseline / 'Results/Cell_Summary.csv')

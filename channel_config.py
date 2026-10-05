@@ -2,7 +2,7 @@
 import json
 import re
 
-import tifffile
+from image_io import inspect_image
 
 
 def add_channel_arguments(parser):
@@ -30,7 +30,7 @@ def resolve_channels(out, nuclear_channel=None, foci_channels=None):
             parameters.update(json.loads(path.read_text()))
     manifest_path = methods / 'Run_Manifest.json'
     manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
-    for key in ['nuclear_channel', 'foci_channels']:
+    for key in ['nuclear_channel', 'foci_channels', 'rgb_channel_order', 'pixel_size_um']:
         if key in manifest:
             parameters[key] = manifest[key]
     recorded_nuclear = parameters.get('nuclear_channel')
@@ -63,12 +63,9 @@ def check_channel_inputs(out, parameters, mapping, images, cells, qc):
         if f'C{c}_foci_count' not in cells or f'C{c}_total_foci' not in images:
             raise ValueError(f'No saved summary for foci channel {c}; rerun analyze_foci.py for this channel')
     for _, row in mapping.iterrows():
-        with tifffile.TiffFile(row.source_path) as tf:
-            series = tf.series[0]
-            if series.axes != 'CYX' or len(series.shape) != 3:
-                raise ValueError(f'{row.image_id}: expected a multichannel 2D CYX source image')
-            if max([nuclear, *foci]) > series.shape[0]:
-                raise ValueError(f'{row.image_id}: requested channel is unavailable; source has {series.shape[0]} channels')
+        md = inspect_image(row.source_path, parameters, require_calibration=False)
+        if max([nuclear, *foci]) > md['shape'][0]:
+            raise ValueError(f"{row.image_id}: requested channel is unavailable; source has {md['shape'][0]} channels")
         paths = [out / 'Masks' / f'{row.image_id}_nuclei.tif']
         paths += [out / 'Masks' / f'{row.image_id}_C{c}_foci.tif' for c in foci]
         for path in paths:

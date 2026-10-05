@@ -1,7 +1,7 @@
 # scikitORION
 
 Reproducible, calibrated 2D nuclear-foci analysis for multichannel ImageJ TIFF
-images. scikitORION segments nuclei, detects foci in one or more selected
+images and explicitly mapped RGB TIFF exports. scikitORION segments nuclei, detects foci in one or more selected
 channels, records measurement provenance, produces quality-control material and
 reports, and validates the generated result tables.
 
@@ -13,6 +13,9 @@ directory.
 ## Features
 
 - Calibration-aware processing of 2D `CYX` ImageJ TIFF files.
+- Input extensions `.tif` and `.tiff` are accepted in any letter case, including
+  `.TIF` and `.TIFF`; files keep their original names. macOS `._` metadata
+  companions on external drives are ignored.
 - Configurable nuclear segmentation and per-channel foci detection.
 - One-based command-line channel selection with saved run manifests.
 - Per-image, per-nucleus, and per-focus measurement tables.
@@ -32,6 +35,7 @@ scikitORION/
 ├── make_outputs.py
 ├── validate_results.py
 ├── channel_config.py
+├── image_io.py
 ├── make_workbook.mjs
 ├── parameters.template.json
 ├── requirements.txt
@@ -51,8 +55,8 @@ Keep the scripts together when copying them into an existing analysis
 workspace. The generated output records the script version and effective
 parameters used for that run.
 
-Keep `analyze_foci.py`, `make_outputs.py`, `validate_results.py`, and
-`channel_config.py` together. You can copy this folder's contents into your
+Keep `analyze_foci.py`, `make_outputs.py`, `validate_results.py`,
+`channel_config.py`, and `image_io.py` together. You can copy this folder's contents into your
 working directory. No installation as a Python package is required; install
 the dependencies in `requirements.txt` in your Python environment.
 
@@ -84,7 +88,11 @@ of the scripts.
 ## Requirements and installation
 
 - Python 3.12 is the validated runtime for the pinned dependency set.
-- A calibrated multichannel ImageJ TIFF with `CYX` axes is required.
+- A calibrated multichannel ImageJ/OME TIFF with `CYX` axes, or a calibrated 2D RGB
+  TIFF with an explicit color-to-channel mapping, is required.
+- If physical pixel size was lost during export, supply the acquisition
+  calibration with `--pixel-size-um X Y` in µm per pixel. See
+  [CHANNELS.md](CHANNELS.md) for calibration sources and overrides.
 - Node.js is optional and is only needed for workbook generation.
 
 Install the Python dependencies in a virtual environment:

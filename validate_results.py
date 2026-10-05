@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import tifffile
 from channel_config import add_channel_arguments, resolve_channels, check_channel_inputs
+from image_io import read_channels
 
 
 def main():
@@ -38,7 +39,7 @@ def main():
     if len(focus):
         ck(((focus.relative_radial_position>=0)&(focus.relative_radial_position<=1)).all(),'Normalized nuclear positions lie in [0,1]')
     for _,m in mapping.iterrows():
-        im=m.image_id;raw=tifffile.imread(m.source_path);nu=tifffile.imread(out/'Masks'/f'{im}_nuclei.tif');cs=cell[cell.image_id==im]
+        im=m.image_id;raw=read_channels(m.source_path,p);nu=tifffile.imread(out/'Masks'/f'{im}_nuclei.tif');cs=cell[cell.image_id==im]
         ck(hashlib.sha256(Path(m.source_path).read_bytes()).hexdigest()==m.sha256,f'{im}: raw SHA256 unchanged')
         ck(nu.shape==raw[nuclear_channel-1].shape,f'{im}: nuclear mask dimensions match channel {nuclear_channel}')
         ck(set(np.unique(nu))-{0}==set(cs.nucleus_label),f'{im}: nuclear label IDs match table')
@@ -81,6 +82,7 @@ def main():
     counts={'images':len(image),'nuclei':len(cell),**{f'channel_{c}_foci':int((focus.channel==c).sum()) for c in foci_channels}}
     report={'status':'passed','counts':counts,'checks_passed':len(checks),'checks':checks,
             'nuclear_channel':nuclear_channel,'foci_channels':foci_channels,
+            'rgb_channel_order':p.get('rgb_channel_order'),
             'validation_scope':'Independent pixel/mask/table reconciliation for the selected channels; not validation against human focus ground truth.'}
     (out/'Methods'/'Validation_Report.json').write_text(json.dumps(report,indent=2))
     print(json.dumps({'status':'passed','counts':counts,'checks_passed':len(checks)},indent=2))
