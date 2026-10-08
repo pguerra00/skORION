@@ -85,11 +85,32 @@ def metadata_row(path,idx,md,group_names=None):
             'group_mapping_status':status}
 
 
+def validate_nuclear_threshold_range(p):
+    """An optional inclusive range selects foreground in original pixel units."""
+    bounds=p.get('fixed_threshold_adu')
+    if bounds is None:return None
+    if (not isinstance(bounds,list) or len(bounds)!=2
+            or any(type(value) not in (int,float) or not math.isfinite(value) for value in bounds)
+            or bounds[0]<0 or bounds[1]<bounds[0]):
+        raise ValueError('nuclear.fixed_threshold_adu must be [lower, upper] with finite, '
+                         'nonnegative numbers and lower <= upper, or null for adaptive thresholding')
+    return tuple(float(value) for value in bounds)
+
+
 def nuclear_segmentation(raw,p,sx,sy):
+    fixed=validate_nuclear_threshold_range(p)
+    # Keep the existing background diagnostics in both modes. In fixed mode,
+    # smoothing is not used to decide which intensity pixels are foreground.
     sm=ndi.gaussian_filter(raw.astype(float),p['gaussian_sigma_px'],mode='reflect')
     baseline=float(np.median(sm));sig=mad(sm)
-    threshold=baseline+max(p['threshold_floor_offset_adu'],p['threshold_mad_multiplier']*sig)
-    b=morphology.closing(sm>threshold,morphology.disk(p['closing_disk_radius_px']))
+    if fixed is None:
+        threshold=baseline+max(p['threshold_floor_offset_adu'],p['threshold_mad_multiplier']*sig)
+        upper=None;method='adaptive'
+        foreground=sm>threshold
+    else:
+        threshold,upper=fixed;method='fixed_raw'
+        foreground=(raw>=threshold)&(raw<=upper)
+    b=morphology.closing(foreground,morphology.disk(p['closing_disk_radius_px']))
     b=ndi.binary_fill_holes(b)
     cc=measure.label(b,connectivity=2)
     areas=np.bincount(cc.ravel()); keep=areas>=p['candidate_min_area_px'];keep[0]=False
@@ -127,7 +148,9 @@ def nuclear_segmentation(raw,p,sx,sy):
              'nuclear_centroid_x_um':r.centroid[1]*sx,'nuclear_centroid_y_um':r.centroid[0]*sy,
              'nuclear_solidity':r.solidity,'nuclear_eccentricity':r.eccentricity,
              'nuclear_aspect_ratio':aspect,'nuclear_shape_warning':'; '.join(shape),
-             'DAPI_threshold_adu':threshold,'DAPI_background_smoothed_adu':baseline,'DAPI_background_smoothed_mad_adu':sig}
+             'DAPI_threshold_adu':threshold,'nuclear_threshold_upper_adu':upper,
+             'nuclear_threshold_method':method,
+             'DAPI_background_smoothed_adu':baseline,'DAPI_background_smoothed_mad_adu':sig}
         if not reason:usable[r.slice][r.image]=r.label
         audit.append(rec)
     return usable,candidates,audit
@@ -316,6 +339,7 @@ def main():
     p=json.loads(parameter_bytes)
     try:
         nuclear_channel,foci_channels=select_channels(p,args.nuclear_channel,args.foci_channels)
+        validate_nuclear_threshold_range(p['nuclear'])
         validate_group_names(p.get('group_names',[]))
         p['rgb_channel_order']=validate_rgb_channel_order(args.rgb_channel_order if args.rgb_channel_order is not None else p.get('rgb_channel_order'))
         p['pixel_size_um']=validate_pixel_size(args.pixel_size_um if args.pixel_size_um is not None else p.get('pixel_size_um'))

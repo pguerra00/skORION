@@ -26,6 +26,7 @@ STYLE={'font.family':'DejaVu Sans','font.size':10,'axes.titlesize':11,'axes.labe
 plt.rcParams.update(STYLE)
 SHARED_CONTRAST_PAGE_SIZE=12
 SHARED_CONTRAST_COLUMNS=4
+SCATTER_SIZE=8
 
 
 def norm(raw,limits):
@@ -180,12 +181,9 @@ def make_qc(out,mapping,cell,focus,p):
     make_shared_contrast(qdir,mapping,p)
 
 
-def expand_groups(df):
-    """Expand only plotting copies; saved measurements keep their unique IDs."""
-    if 'group_names' not in df or df.empty:return df.copy()
-    result=df.copy()
-    result['treatment_group']=[json.loads(value) or ['AMBIGUOUS'] for value in result.group_names]
-    return result.explode('treatment_group',ignore_index=True)
+def treatment_ticks(ax,fontsize=8):
+    ax.set_xticks(range(len(GROUPS)),LABELS,fontsize=fontsize,
+                  rotation=45,ha='right',rotation_mode='anchor')
 
 
 def stripbox(ax,df,col,ylabel,rng,log=False):
@@ -195,16 +193,15 @@ def stripbox(ax,df,col,ylabel,rng,log=False):
         bp=ax.boxplot([vals],positions=[j],widths=.40,showfliers=False,patch_artist=True,
                       boxprops={'facecolor':COLORS[j]+'25','edgecolor':COLORS[j]},medianprops={'color':'#222222','linewidth':1.5},
                       whiskerprops={'color':COLORS[j]},capprops={'color':COLORS[j]})
-        ax.scatter(j+rng.uniform(-.16,.16,len(vals)),vals,s=16 if len(vals)<100 else 3,
+        ax.scatter(j+rng.uniform(-.16,.16,len(vals)),vals,s=SCATTER_SIZE,
                    color=COLORS[j],alpha=.65 if len(vals)<100 else .18,edgecolors='none',rasterized=True)
-    ax.set_xticks(range(len(GROUPS)),LABELS,fontsize=8)
+    treatment_ticks(ax)
     ax.set_ylabel(ylabel);ax.grid(axis='y',alpha=.16)
     if log and (pd.to_numeric(df[col],errors='coerce')>0).any():ax.set_yscale('log')
     elif ax.get_ylim()[0]>0:ax.set_ylim(bottom=0)
 
 
 def make_plots(out,cell,focus,image,p):
-    cell,focus,image=(expand_groups(df) for df in (cell,focus,image))
     rng=np.random.default_rng(p['random_seed_for_plot_jitter'])
     for c in p['foci_channels']:
         print(f'Rendering comparison plots for channel {c}...',flush=True)
@@ -247,9 +244,9 @@ def make_plots(out,cell,focus,image,p):
         for ax,(key,label) in zip(axs.flat,metrics):
             for j,g in enumerate(GROUPS):
                 for _,r in image[image.treatment_group==g].iterrows():
-                    val=r[f'C{c}_{key}'];ax.scatter(j,val,c=COLORS[j],s=75,marker=MARKERS[r.image_id],zorder=4)
+                    val=r[f'C{c}_{key}'];ax.scatter(j,val,c=COLORS[j],s=SCATTER_SIZE,marker=MARKERS[r.image_id],zorder=4)
                     ax.annotate(r.image_id,(j,val),xytext=(0,8),textcoords='offset points',ha='center',fontsize=8)
-            ax.set_xticks(range(len(GROUPS)),LABELS,fontsize=8);ax.set_xlim(-.5,len(GROUPS)-.5);ax.set_ylabel(label);ax.grid(axis='y',alpha=.16)
+            treatment_ticks(ax);ax.set_xlim(-.5,len(GROUPS)-.5);ax.set_ylabel(label);ax.grid(axis='y',alpha=.16)
             maximum=float(image[f'C{c}_{key}'].max())
             ax.set_ylim(bottom=0,top=max(maximum*1.22,.01) if np.isfinite(maximum) else 1)
         fig.suptitle(f'Channel {c} · {name} · image-level comparisons\nEach point is one image. Descriptive comparisons; nuclei are nested observations.',fontsize=14)
@@ -272,22 +269,87 @@ def make_plots(out,cell,focus,image,p):
             for _,r in image[image.treatment_group==g].iterrows():
                 v=r[f'C{c}_percent_focus_positive_nuclei']
                 n=int(r.nuclei_analyzed);pos=int(cell.loc[(cell.image_id==r.image_id)&(cell.treatment_group==g),f'C{c}_focus_positive'].sum())
-                ax.scatter(j,v,s=110,marker=MARKERS[r.image_id],color=COLORS[j]);ax.annotate(f'{r.image_id}: {pos}/{n} nuclei\n{v:.1f}%',(j,v),xytext=(0,-35),textcoords='offset points',ha='center',fontsize=10)
-        ax.set_xticks(range(len(GROUPS)),LABELS);ax.set_xlim(-.5,len(GROUPS)-.5);ax.set_ylim(0,110);ax.set_ylabel('Focus-positive nuclei (%)');ax.grid(axis='y',alpha=.2)
+                ax.scatter(j,v,s=SCATTER_SIZE,marker=MARKERS[r.image_id],color=COLORS[j]);ax.annotate(f'{r.image_id}: {pos}/{n} nuclei\n{v:.1f}%',(j,v),xytext=(0,-35),textcoords='offset points',ha='center',fontsize=10)
+        treatment_ticks(ax,fontsize=10);ax.set_xlim(-.5,len(GROUPS)-.5);ax.set_ylim(0,110);ax.set_ylabel('Focus-positive nuclei (%)');ax.grid(axis='y',alpha=.2)
         ax.set_title(f'Channel {c} · {name} · focus-positive nuclei\nOne point per image; no biological replicates')
         figsave(fig,folder,'Focus_Positive_Nuclei')
-    # Input distributions before any image correction, on a log-count histogram scale.
-    mapping=expand_groups(pd.read_csv(out/'Methods'/'Treatment_Group_Mapping.csv'))
+    mapping=pd.read_csv(out/'Methods'/'Treatment_Group_Mapping.csv')
+    make_input_intensity_plots(out/'QC',mapping,p)
+
+
+def input_intensity_groups(mapping,c):
+    """Use stable indices rather than treatment names in exported filenames."""
+    for j,g in enumerate(mapping.treatment_group.unique()):
+        yield f'C{c}_Input_Intensity_Group_{j+1:03d}',g,mapping[mapping.treatment_group==g]
+
+
+def input_intensity_distributions(mapping,c,p):
+    """Retain only small histogram arrays; read one source image at a time."""
+    lower,upper=1.,1.
+    records=[]
+    for _,m in mapping.iterrows():
+        a=read_channels(m.source_path,p)[c-1]
+        positive=a[a>0]
+        if positive.size:lower=min(lower,float(positive.min()))
+        upper=max(upper,256 if a.dtype==np.uint8 else 7500,float(a.max())+1)
+        records.append({'image_id':m.image_id,'treatment_group':m.treatment_group,
+                        'mean_intensity':float(np.mean(a,dtype=np.float64)),
+                        'all_zero':bool(np.all(a==0))})
+        del a,positive
+    bins=np.geomspace(lower,upper,130)
+    for record,(_,m) in zip(records,mapping.iterrows()):
+        a=read_channels(m.source_path,p)[c-1]
+        counts=np.histogram(a.ravel(),bins=bins)[0]
+        # Normalize by ALL pixels, including the zero mass omitted on a log axis.
+        record['density']=counts/(a.size*np.diff(bins))
+        del a
+    return bins,records
+
+
+def make_input_intensity_plots(qdir,mapping,p):
+    if mapping.empty:return
     for c in p['foci_channels']:
-        fig,ax=plt.subplots(figsize=(9,5),layout='constrained')
-        for j,g in enumerate(GROUPS):
-            for _,m in mapping[mapping.treatment_group==g].iterrows():
-                a=read_channels(m.source_path,p)[c-1]
-                upper=256 if a.dtype==np.uint8 else max(7500,float(a.max())+1)
-                bins=np.geomspace(max(1,a.min()),upper,130)
-                ax.hist(a.ravel(),bins=bins,histtype='step',density=True,color=COLORS[j],label=f'{LABELS[j]} · {m.image_id}',lw=1.5)
-        ax.set_xscale('log');ax.set_yscale('log');ax.set_xlabel('Raw pixel intensity (ADU)');ax.set_ylabel('Probability density');ax.legend();ax.set_title(f'Channel {c} · input intensity distributions\nAll image pixels before correction; same axes for treatments')
-        figsave(fig,out/'QC',f'C{c}_Input_Intensity_Histogram')
+        print(f'Rendering per-treatment input intensity plots for channel {c}...',flush=True)
+        bins,records=input_intensity_distributions(mapping,c,p)
+        groups=[]
+        for stem,g,fields in input_intensity_groups(mapping,c):
+            images=[r for r in records if r['treatment_group']==g]
+            groups.append((stem,g,images,np.mean([r['density'] for r in images],axis=0),
+                           float(np.mean([r['mean_intensity'] for r in images]))))
+        # Include the average curves when finding shared limits: averaging can
+        # reduce a nonzero density below every individual image's nonzero bins.
+        densities=[r['density'] for r in records]+[group[3] for group in groups]
+        positive=np.concatenate([d[d>0] for d in densities])
+        ylim=(float(positive.min())/2,float(positive.max())*2) if positive.size else (1e-6,1)
+        xmin=min([bins[0]]+[mean for _,_,_,_,mean in groups if mean>0])*.9
+        for j,(stem,g,images,average,mean) in enumerate(groups):
+            color=COLORS[j%len(COLORS)]
+            fig,ax=plt.subplots(figsize=(9,5),layout='constrained')
+            try:
+                ax.set_xscale('log');ax.set_yscale('log')
+                ax.set_xlim(xmin,bins[-1]);ax.set_ylim(*ylim)
+                for image in images:
+                    ax.stairs(image['density'],bins,baseline=None,color=color,alpha=.25,lw=1)
+                ax.stairs(average,bins,baseline=None,color=color,lw=2.5)
+                if mean>0:ax.axvline(mean,color=color,linestyle='--',lw=1.5)
+                handles=[Line2D([],[],color=color,alpha=.25,lw=1,label=f'Individual images (n={len(images)})'),
+                         Line2D([],[],color=color,lw=2.5,label='Average distribution'),
+                         Line2D([],[],color=color,linestyle='--',lw=1.5,label=f'Mean intensity: {mean:.4g} ADU')]
+                ax.legend(handles=handles,fontsize=9)
+                zeros=sum(r['all_zero'] for r in images)
+                if zeros==len(images):
+                    ax.text(.5,.5,'All images contain only zero-intensity pixels.\nMean intensity: 0 ADU (outside logarithmic axes).',
+                            transform=ax.transAxes,ha='center',va='center')
+                elif zeros:
+                    ax.text(.02,.96,f'{zeros} all-zero image(s); zero intensity is outside logarithmic axes.',
+                            transform=ax.transAxes,va='top',fontsize=8)
+                label=textwrap.fill(str(g).replace('ART558_20PDS','ART558 + 20PDS'),width=70)
+                ax.set_title(f'Channel {c} · {marker_name(p,c)} · input intensity distribution\n{label} · {len(images)} image(s)')
+                ax.set_xlabel('Raw pixel intensity (ADU)');ax.set_ylabel('Probability density')
+                fig.supxlabel('Each image has equal weight. Zero pixels contribute to normalization and mean,\nbut are omitted from the logarithmic intensity axis.',fontsize=8)
+                figsave(fig,qdir,stem)
+            finally:
+                plt.close(fig)
 
 
 def flatten(p,prefix=''):
@@ -303,11 +365,15 @@ def definition(col):
     exact={
       'image_id':'Stable image observation ID assigned by sorted filename. Not a biological replicate ID.',
       'image_name':'Unmodified raw TIFF filename.', 'treatment_group':'Combined matched group labels, or legacy filename treatment token. Dose units are not inferred.',
-      'group_names':'JSON list of all matched groups. Measurements appear in each group comparison, but are stored once. Empty list means unmatched.',
+      'group_names':'JSON list of matched filename labels retained as metadata. Comparisons use the combined treatment_group. Empty list means unmatched.',
       'number_images_in_treatment':'Number of images with the same complete combination of group labels.',
       'replicate_id':'Missing for this proof of concept, as confirmed by user.',
       'nucleus_id':'Globally unique image ID plus candidate nucleus label; matches nuclear TIFF label.',
       'nucleus_label':'Integer object value in the nuclear label TIFF; IDs can have gaps after exclusions.',
+      'nuclear_threshold_adu':'Lower nuclear foreground threshold in stored intensity units; adaptive uses smoothed intensity > threshold, fixed_raw uses original intensity >= threshold.',
+      'DAPI_threshold_adu':'Legacy alias of nuclear_threshold_adu for nuclear channels labeled DAPI.',
+      'nuclear_threshold_upper_adu':'Inclusive upper bound on original nuclear-channel intensities in fixed_raw mode; missing in adaptive mode. Closing and hole filling follow foreground selection.',
+      'nuclear_threshold_method':'adaptive estimates a smoothed-intensity cutoff per image; fixed_raw uses the configured inclusive range on original intensities.',
       'focus_id':'Globally unique image, channel and focus label ID.',
       'focus_label':'Integer object value in that image/channel focus TIFF.',
       'raw_integrated_adu_px':'Sum of stored source pixel intensities over this focus. For RGB exports, values are color-component intensities.',
@@ -384,6 +450,18 @@ def build_methods(out,p,mapping,images,cell,focus,qc):
               if rgb_inputs else '')
     rgb_option=' --rgb-channel-order '+' '.join(p['rgb_channel_order']) if rgb_inputs else ''
     calibration_option=' --pixel-size-um '+' '.join(map(str,p['pixel_size_um'])) if p.get('pixel_size_um') else ''
+    np_cfg=p['nuclear'];fixed=np_cfg.get('fixed_threshold_adu')
+    if fixed is not None:
+        nuclear_threshold_description=(f'Initial nuclear foreground uses the fixed inclusive range {fixed[0]:g}–{fixed[1]:g} ADU '
+                                       'on the original nuclear-channel pixels, identically for every image. '
+                                       'Gaussian intensity smoothing and background subtraction are not used for foreground selection. '
+                                       'The recorded smoothed background median and MAD are diagnostics only. '
+                                       'The lower and upper bounds and fixed_raw mode are recorded in the nucleus audit and cell table.')
+    else:
+        nuclear_threshold_description=(f'Gaussian smoothing (sigma {np_cfg["gaussian_sigma_px"]:g} px) is used only for detection. '
+                                       'The foreground threshold is the full-image smoothed nuclear-channel median plus '
+                                       f'max({np_cfg["threshold_floor_offset_adu"]:g} ADU, {np_cfg["threshold_mad_multiplier"]:g} x robust MAD sigma); '
+                                       'nuclei occupy a minority of these fields. There is no upper intensity cutoff.')
     methods=f'''# Reproducible 2D nuclear foci quantification
 
 ## Scope and experimental units
@@ -393,10 +471,10 @@ Inputs are read as calibrated 2D channel planes in CYX order. Source layout, cha
 
 {rgb_note}
 
-Configured group_names use case-insensitive literal substring matching against the filename without its extension. Every matching name is retained in the group_names JSON-list column; treatment_group displays their combination. Without configured names, the legacy filename parser is used. Unmatched images remain AMBIGUOUS. Measurements and totals count each object once; comparison plots include it in every assigned group. Overlapping groups are not independent observations. number_images_in_treatment counts images with the same full combination of labels.
+Configured group_names use case-insensitive literal substring matching against the filename without its extension. Every matching name is retained in the group_names JSON-list column; treatment_group displays their combination in configuration order. Without configured names, the legacy filename parser is used. Unmatched images remain AMBIGUOUS. Every comparison uses treatment_group as its category: each image, nucleus, and focus contributes once to its combined treatment group. number_images_in_treatment counts images with the same full combination of labels.
 
 ## Nuclear segmentation
-Gaussian smoothing (sigma 2 px) is used only for detection. The foreground threshold is the full-image smoothed nuclear-channel median plus max(5 ADU, 4 x robust MAD sigma); nuclei occupy a minority of these fields. Closing uses a 3 px disk and internal holes are filled. Components below 1,000 px are discarded as debris before the candidate list. A distance transform smoothed at sigma 3 px supplies h-maxima (height 10 px, edge distance >20 px) for watershed splitting. A connected candidate without such a seed receives its greatest-distance pixel as a seed, allowing border fragments to be audited.
+{nuclear_threshold_description} Closing uses a 3 px disk and internal holes are filled. Components below 1,000 px are discarded as debris before the candidate list. A distance transform smoothed at sigma 3 px supplies h-maxima (height 10 px, edge distance >20 px) for watershed splitting. A connected candidate without such a seed receives its greatest-distance pixel as a seed, allowing border fragments to be audited.
 
 Candidates from 25 to 500 square microns are retained unless their bounding box intersects a 2 px image-edge buffer. This deliberately excludes all border-touching nuclei, including potentially mildly truncated ones. Exclusion percentage uses the post-debris, post-watershed candidate count as denominator. Nuclear masks retain candidate label IDs. Objects below the debris prefilter are not included in this denominator. Nuclear solidity <0.85 or aspect ratio >3 generates an inspection warning only; such nuclei remain in the analysis. Nucleus_Inclusion_Audit.csv records every candidate and exclusion reason. No manual mask edits were made.
 
@@ -422,6 +500,8 @@ For each nucleus, per-focus intensity means and medians summarize the focus mean
 
 ## QC and sensitivity
 Annotated_QC figures show paired raw and overlay views plus label masks for each channel. {detailed_qc} Yellow marks counted foci, cyan accepted nuclear boundaries and red excluded candidates. TIFF mask values map exactly to the result label columns. Raw/overlay pairs share display limits; per-image QC contrast is for inspection only. Shared_Contrast figures use one range per channel across all images. Display clipping is distinct from detector saturation and does not change measurements.
+
+Input intensity figures are exported separately for each combined treatment_group and selected channel as QC/C{{channel}}_Input_Intensity_Group_{{index:03d}}.png and .svg. Group indices follow the image mapping's treatment order, and colors match the comparison figures. Faint curves (alpha 0.25) represent individual images; the thicker solid curve is the arithmetic mean of their probability densities. The dashed vertical line is the arithmetic mean of their raw mean pixel intensities. Each image receives equal weight in both averages, regardless of its dimensions. Bins and logarithmic axis limits are shared across groups within each channel. Each image's histogram counts are divided by its total pixel count and bin widths, including zero pixels in the normalization; zero intensity is omitted from the logarithmic axis but included in the raw mean. Thus the density integral can be below one when zero pixels are present. All-zero images contribute zero density and zero mean, with an annotation instead of a vertical line at zero. Legends contain only three entries. Scatter markers use one fixed small size (8 points squared), and treatment-axis labels are rotated 45 degrees and right aligned.
 
 Saturation uses each input dtype's maximum stored value: 255 for uint8, 65535 for uint16. For RGB exports this measures clipping of exported color components, not detector saturation. The source files do not necessarily specify detector effective bit depth; absence of container saturation cannot prove absence of detector clipping. Per-image saturation values are in Treatment_Group_Mapping.csv. Observed maxima and saturation fractions should be reviewed in Input_Intensity_Distributions.csv and the saved QC tables.
 
@@ -466,12 +546,12 @@ def report(out,mapping,images,cell,focus,qc,p):
     totals=' · '.join(f'C{c} {marker_name(p,c)}: {int((focus.channel==c).sum()):,} foci' for c in channels)
     body='''<!doctype html><html><head><meta charset="utf-8"><title>Foci analysis review</title><style>
 body{font:16px/1.55 system-ui,Arial;color:#203043;background:#f7f9fb;max-width:1250px;margin:auto;padding:35px}h1{font-size:32px}h2{margin-top:2.2em}a{color:#006b9c}table{border-collapse:collapse;background:white;width:100%;font-size:14px}th,td{padding:10px;border-bottom:1px solid #dbe2e9;text-align:left}th{background:#243c50;color:white}img{max-width:100%;height:auto}article{background:white;padding:22px;margin:18px 0;border:1px solid #dbe2e9;border-radius:8px}.note{border-left:4px solid #d69132;padding:12px 18px;background:#fff6e8}.gallery{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}.gallery img{width:100%}summary{cursor:pointer;font-weight:600}small{color:#526779}.links a{margin-right:18px}li{margin-bottom:7px}</style></head><body>'''
-    body+=f'<h1>Fluorescent foci quantification</h1><p>{len(mapping)} images · {expand_groups(mapping).treatment_group.nunique()} groups · {len(cell)} usable nuclei · {esc(totals)}</p>'
+    body+=f'<h1>Fluorescent foci quantification</h1><p>{len(mapping)} images · {mapping.treatment_group.nunique()} groups · {len(cell)} usable nuclei · {esc(totals)}</p>'
     body+='<p class="note">All comparisons are descriptive. Nuclei and foci are nested within images. Detected objects and 2D areas require QC review; dense and faint signal remain sources of uncertainty.</p>'
     if 'input_format' in mapping and mapping.input_format.eq('rgb_export').any():
         body+='<p class="note">RGB export analysis: channels use the saved color mapping. Intensities are stored color-component values, not recovered detector ADU. Export display settings and clipping can affect measurements; treat these results as exploratory.</p>'
     if p.get('group_names'):
-        body+='<p>Images appear in every matching group comparison. Groups can overlap; group counts must not be added as independent observations. The summary below shows each image once with its combined group labels.</p>'
+        body+='<p>Comparisons use combined treatment groups. Each image, nucleus, and focus contributes once to its treatment_group; group_names retains the matched filename labels as metadata.</p>'
     body+='<p class="links"><a href="Methods/Methods.md">Detailed methods</a><a href="Methods/Output_Parameters.json">Report parameters</a><a href="Methods/Treatment_Group_Mapping.csv">Image mapping</a><a href="QC/QC_Summary.csv">QC summary CSV</a></p>'
     body+=summary.to_html(index=False,float_format=lambda x:f'{x:,.2f}',border=0)
     body+=f'<p>Nuclear segmentation: {esc(nuclear)}. Marker labels come from the analysis configuration. Border nuclei are excluded; focus-negative nuclei remain in summaries. Per-image calibration is recorded in the image mapping.</p>'
@@ -502,7 +582,15 @@ body{font:16px/1.55 system-ui,Arial;color:#203043;background:#f7f9fb;max-width:1
         body+='<details><summary>Shared-contrast raw fields</summary>'
         for page,(filename,_) in enumerate(shared_contrast_pages(mapping,c),1):
             body+=f'<p>Page {page}</p><a href="QC/{filename}"><img loading="lazy" src="QC/{filename}" alt="Channel {c} shared contrast, page {page}"></a>'
-        body+='</details></article>'
+        body+='</details>'
+        histograms=[(stem,g) for stem,g,_ in input_intensity_groups(mapping,c) if (out/'QC'/f'{stem}.png').exists()]
+        if histograms:
+            body+='<details><summary>Input intensity distributions by treatment</summary><p>Faint curves show individual images; the solid curve is their average distribution and the dashed line marks their mean intensity. Each image has equal weight. Groups share the same axes within this channel.</p>'
+            for stem,g in histograms:
+                body+=f'<h4>{esc(g)}</h4><a href="QC/{stem}.png"><img loading="lazy" src="QC/{stem}.png" alt="Channel {c} input intensities: {esc(g)}"></a>'
+                body+=f'<p><a href="QC/{stem}.png">PNG</a> · <a href="QC/{stem}.svg">editable SVG</a></p>'
+            body+='</details>'
+        body+='</article>'
     body+='<h2>Files and reproducibility</h2><ul>'
     for f in ['Results/Image_Summary.csv','Results/Cell_Summary.csv','Results/Focus_Data.csv','QC/Nucleus_Inclusion_Audit.csv','QC/Focus_Candidate_Audit.csv','QC/Threshold_Sensitivity.csv','QC/Input_Intensity_Distributions.csv','Methods/Applied_Thresholds.csv','Methods/Data_Dictionary.csv','Methods/Run_Manifest.json','Methods/Validation_Report.json','Methods/Methods.md']:
         body+=f'<li><a href="{f}">{f}</a></li>'
@@ -518,10 +606,10 @@ body{font:16px/1.55 system-ui,Arial;color:#203043;background:#f7f9fb;max-width:1
             '', 'QC inspection findings:','']
     for _,r in qc.iterrows():lines.append(f'- {r.image_id}, C{r.channel}: {r.manual_inspection_warnings}.')
     if p.get('group_names'):
-        lines+=['','Group comparisons include each image in every matching group; groups overlap. Measurement totals count each object once.']
+        lines+=['','Comparisons use combined treatment_group labels. Each image, nucleus, and focus contributes once to its treatment group.']
     lines+=['','Major outputs:','', '- Review.html: linked review report'+(' and nucleus galleries.' if detailed else '.'),
             '- Results/: image, cell, focus, and QC measurement tables.',
-            '- QC/: annotated figures, '+('native overlays, nucleus crops, ' if detailed else '')+'shared-contrast figures, and QC metrics.',
+            '- QC/: annotated figures, '+('native overlays, nucleus crops, ' if detailed else '')+'shared-contrast figures, per-treatment input intensity plots (PNG and SVG), and QC metrics.',
             '- Plots/: '+', '.join(f'Channel_{c}' for c in channels)+'; comparison figures in PNG and SVG.',
             '- Methods/Output_Parameters.json: parameters and channel selection for this report.',
             '', 'Limitations: 2D projections; no manual ground truth. Dense or dim foci are parameter sensitive. See Methods/Methods.md for definitions.']
@@ -551,7 +639,7 @@ def main():
     focus=focus[focus.channel.isin(channels)];qc=qc[qc.channel.isin(channels)]
     # Derive groups and image symbols from this run rather than the pilot dataset.
     global GROUPS,LABELS,COLORS,MARKERS
-    GROUPS=list(expand_groups(mapping).treatment_group.unique());LABELS=[g.replace('ART558_20PDS','ART558 + 20PDS') for g in GROUPS]
+    GROUPS=list(mapping.treatment_group.unique());LABELS=[g.replace('ART558_20PDS','ART558 + 20PDS') for g in GROUPS]
     palette=['#0072B2','#D55E00','#009E73','#CC79A7','#E69F00','#56B4E9','#000000']
     COLORS=[palette[i%len(palette)] for i in range(len(GROUPS))]
     MARKERS={im:['s','o','^','D','v','P','X'][i%7] for i,im in enumerate(mapping.image_id)}

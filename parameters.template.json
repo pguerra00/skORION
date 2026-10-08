@@ -18,6 +18,7 @@
   "analysis_unit": "usable nucleus from the selected nuclear channel",
   "nuclear": {
     "gaussian_sigma_px": 2.0,
+    "fixed_threshold_adu": null,
     "threshold_rule": "median(smoothed nuclear channel) + max(5 ADU, 4 * 1.4826 * MAD(smoothed nuclear channel))",
     "threshold_floor_offset_adu": 5.0,
     "threshold_mad_multiplier": 4.0,

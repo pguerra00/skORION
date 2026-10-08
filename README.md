@@ -111,6 +111,27 @@ for a production comparison.
 The last two commands reuse the analysis's saved channel selections. See
 [CHANNELS.md](CHANNELS.md) for overrides, marker labels, and selecting subsets.
 
+## Fixed nuclear thresholds
+
+To reproduce a manually chosen nuclear intensity range, add
+`"fixed_threshold_adu": [131, 255]` inside the existing `nuclear` object in your
+experiment's parameters. Keep the object's other settings. The bounds are
+inclusive and apply to the original nuclear-channel pixels, before intensity
+smoothing or background subtraction. For RGB TIFFs, these are the values of
+the individual color component selected by your explicit RGB channel mapping.
+
+The range replaces the adaptive median/MAD cutoff for nuclear foreground
+selection. Closing, hole filling, watershed splitting, and nucleus size/border
+filters still follow it, so the final masks can differ from FIJI's initial
+threshold selection. Foci threshold settings are independent of this option.
+The nucleus audit and cell table record the threshold method and both bounds;
+the generated methods describe the active rule. Set the entry to `null`, or
+remove it, to use the original adaptive method. The `threshold_rule` string is
+descriptive text, not an executable expression.
+
+Changing nuclear thresholding requires rerunning `analyze_foci.py` to create
+new masks and measurements. Regenerating plots alone does not rerun detection.
+
 ## Automatic QC and progress
 
 Add `--qc-output minimal` or `--qc-output detailed` to the analysis command to
@@ -150,10 +171,10 @@ Set the top-level `group_names` list in your experiment's `parameters.json`:
 Matching uses case-insensitive literal substrings of each filename, excluding its
 extension, and retains **every match** in configuration order. For example:
 
-| Filename | Assigned groups |
-| --- | --- |
-| `field_siHELQ_100MMC_01.tif` | siHELQ, MMC |
-| `field_siHELQ_20PDS_02.tif` | siHELQ, PDS |
+| Filename | Matched labels | Treatment group used for plotting |
+| --- | --- | --- |
+| `field_siHELQ_100MMC_01.tif` | siHELQ, MMC | siHELQ + MMC |
+| `field_siHELQ_20PDS_02.tif` | siHELQ, PDS | siHELQ + PDS |
 
 Choose specific names to avoid unintended substring matches: `PDS` also matches
 `20PDS`, and configuring both assigns both groups. Names must be nonempty and
@@ -164,10 +185,15 @@ analysis as `AMBIGUOUS` with a terminal warning.
 Measurement and mapping CSVs store all assignments in a `group_names` column as
 a JSON list. `treatment_group` shows the combined label (such as `siHELQ + MMC`).
 Each image, nucleus, and focus is measured and stored once. Comparison plots
-include each observation in every assigned group, so groups may overlap and their
-counts must not be summed as independent observations. Image summaries retain
-one row per image; `number_images_in_treatment` counts images with the same full
+use `treatment_group`: each observation contributes once to its combined
+category. For example, `siControl + 100MMC` is one category on the graph.
+Image summaries retain one row per image; `number_images_in_treatment` counts
+images with the same full
 combination of group labels.
+
+For existing analyses, rerun `python make_outputs.py --output-dir /path/to/analysis`
+to rebuild the plots and reports using the saved combined treatment groups.
+Segmentation and measurements do not need to be repeated.
 
 ## Automatically create a run folder
 
@@ -204,6 +230,29 @@ Shared-contrast QC figures show up to 12 images per page in a four-column grid.
 Every page uses the same display range for that channel across the entire run.
 `Review.html` links all pages; the first remains `QC/C2_Shared_Contrast.png`
 (for channel 2), followed by `C2_Shared_Contrast_Page_002.png`, and so on.
+
+Input intensity distributions have a separate plot for each combined
+`treatment_group` and selected channel. Files are named
+`QC/C2_Input_Intensity_Group_001.png` and `.svg` (for channel 2), with group
+indices following the treatment order in the image mapping. `Review.html`
+includes labeled previews and links. Colors match the treatment comparison
+figures. Individual image curves are translucent (alpha 0.25); a thicker solid
+curve shows their average distribution, and a dashed vertical line marks their
+mean pixel intensity. Both averages give each image equal weight, regardless
+of its pixel count, and the legend has only three entries.
+
+Histogram bins and logarithmic axis limits are shared across groups within a
+channel. Densities divide each image's bin counts by its total pixel count and
+bin widths. Zero pixels contribute to normalization and mean intensity, but
+cannot appear on a logarithmic intensity axis; the displayed density integral
+can therefore be below one. All-zero images are annotated and contribute zero
+to both averages. All scatter plots use the same small marker size, and
+treatment-axis labels are rotated 45 degrees and right aligned.
+
+Rerun `python make_outputs.py --output-dir /path/to/existing_analysis` to update
+plots and reports from saved measurements without repeating segmentation.
+Older combined histogram files remain in place but are not linked from the
+updated review report.
 
 If an older version stopped with an "Image size ... is too large" error, rerun
 `python make_outputs.py --output-dir /path/to/existing_analysis` with the updated
