@@ -12,6 +12,7 @@ make_outputs.py and validate_results.py reuse the saved channel selection.
 from pathlib import Path
 import argparse, hashlib, json, math, platform, sys, re, tempfile, subprocess
 from datetime import datetime, timezone
+from importlib.metadata import PackageNotFoundError, version
 import numpy as np
 import pandas as pd
 import scipy
@@ -111,7 +112,7 @@ def nuclear_segmentation(raw,p,sx,sy):
         threshold,upper=fixed;method='fixed_raw'
         foreground=(raw>=threshold)&(raw<=upper)
     b=morphology.closing(foreground,morphology.disk(p['closing_disk_radius_px']))
-    b=ndi.binary_fill_holes(b)
+    if p.get('fill_holes',True):b=ndi.binary_fill_holes(b)
     cc=measure.label(b,connectivity=2)
     areas=np.bincount(cc.ravel()); keep=areas>=p['candidate_min_area_px'];keep[0]=False
     b=keep[cc]
@@ -162,6 +163,51 @@ def nuclear_noise(raw,nuc):
     return max(mad(w[v]),0.5)
 
 
+def adaptive_split_peaks(corr,peaks,support,q,pixel_area,connectivity,prominence):
+    """Prune shallow secondary peaks only in large, bright support regions.
+
+    Detection still uses the original absolute thresholds. Relative prominence
+    is tested against each secondary peak's own corrected intensity, so a faint
+    peak does not inherit the threshold of its brighter neighbor. Every support
+    region keeps its strongest original seed. Omitted/zero fraction is legacy.
+    """
+    fraction=q.get('adaptive_split_prominence_fraction',0)
+    if not fraction:return peaks,{},[]
+    minimum_peak=q.get('adaptive_split_minimum_peak_adu',100)
+    minimum_area=q.get('adaptive_split_minimum_area_um2',2)
+    components=measure.label(support,connectivity=connectivity)
+    areas=np.bincount(components.ravel())*pixel_area
+    seed_labels=measure.label(peaks,connectivity=connectivity)
+    candidates={}
+    for region in measure.regionprops(seed_labels,intensity_image=corr):
+        coords=region.coords
+        point=coords[np.argmax(corr[coords[:,0],coords[:,1]])]
+        component=int(components[tuple(point)])
+        if component:candidates.setdefault(component,[]).append((float(region.max_intensity),coords))
+    filtered=peaks.copy();tested=0;suppressed=0;maximum=prominence;removed=[]
+    for component,seeds in candidates.items():
+        if areas[component]<minimum_area or len(seeds)<2:continue
+        # Always retain the strongest seed, including tied plateaus.
+        strongest=max(value for value,_ in seeds)
+        for value,coords in seeds:
+            if value==strongest or value<minimum_peak:continue
+            threshold=max(prominence,fraction*value)
+            if threshold<=prominence:continue
+            tested+=1;maximum=max(maximum,threshold)
+            persistent=morphology.h_maxima(corr,threshold)
+            if not persistent[coords[:,0],coords[:,1]].any():
+                filtered[coords[:,0],coords[:,1]]=False
+                suppressed+=1
+                removed.append(tuple(coords[np.argmax(corr[coords[:,0],coords[:,1]])]))
+    audit={'adaptive_split_prominence_fraction':fraction,
+           'adaptive_split_minimum_peak_adu':minimum_peak,
+           'adaptive_split_minimum_area_um2':minimum_area,
+           'adaptive_split_tested_secondary_peaks':tested,
+           'adaptive_split_suppressed_seeds':suppressed,
+           'adaptive_split_maximum_tested_prominence_adu':maximum}
+    return filtered,audit,removed
+
+
 def detect_nucleus(raw,bg,corr,nuc,c,p,pixel_area,factor=1.0):
     noise=nuclear_noise(raw,nuc)
     smnoise=noise/(2*np.sqrt(np.pi)*p['gaussian_sigma_px'])
@@ -171,13 +217,18 @@ def detect_nucleus(raw,bg,corr,nuc,c,p,pixel_area,factor=1.0):
     prominence=factor*max(q['prominence_floor_adu'],p['prominence_noise_multiplier']*smnoise)
     support=(corr>=low)&nuc
     peaks=morphology.h_maxima(corr,prominence)&(corr>=high)&nuc
+    peaks,split_audit,removed=adaptive_split_peaks(corr,peaks,support,q,pixel_area,p['connectivity'],prominence)
     seeds=measure.label(peaks,connectivity=p['connectivity'])
     labels=segmentation.watershed(-corr,seeds,mask=support,
                                  connectivity=p['watershed_connectivity'],watershed_line=p['watershed_lines'])
+    merged_labels={int(labels[point]) for point in removed}-{0}
+    merged_fraction=q.get('adaptive_split_post_watershed_peak_fraction',p['post_watershed_peak_fraction'])
+    if split_audit:split_audit['adaptive_split_post_watershed_peak_fraction']=merged_fraction
     clipped=np.zeros_like(labels)
     for r in measure.regionprops(labels):
         cr=corr[r.slice]
-        cutoff=max(low,p['post_watershed_peak_fraction']*np.max(cr[r.image]))
+        fraction=merged_fraction if r.label in merged_labels else p['post_watershed_peak_fraction']
+        cutoff=max(low,fraction*np.max(cr[r.image]))
         b=r.image&(cr>=cutoff)
         cc=measure.label(b,connectivity=p['connectivity'])
         pos=np.unravel_index(np.argmax(np.where(r.image,cr,-np.inf)),cr.shape)
@@ -219,7 +270,7 @@ def detect_nucleus(raw,bg,corr,nuc,c,p,pixel_area,factor=1.0):
                   'support_threshold_adu':low,'seed_threshold_adu':high,'prominence_threshold_adu':prominence,
                   'touches_nuclear_boundary':bool(np.any(edge[r.slice]&r.image))}
     return out,extra,audit,{'noise_raw_adu':noise,'noise_smoothed_adu':smnoise,'support_threshold_adu':low,
-                           'seed_threshold_adu':high,'prominence_threshold_adu':prominence}
+                           'seed_threshold_adu':high,'prominence_threshold_adu':prominence,**split_audit}
 
 
 def describe_vals(vals,prefix):
@@ -318,6 +369,15 @@ def select_channels(p,nuclear_channel=None,foci_channels=None):
             value=p['foci'][key].get(field)
             if type(value) not in (int,float) or not math.isfinite(value) or value<0:
                 raise ValueError(f'foci.{key}.{field} must be a finite, nonnegative number')
+        for field,default in [('adaptive_split_prominence_fraction',0),
+                              ('adaptive_split_minimum_peak_adu',100),
+                              ('adaptive_split_minimum_area_um2',2),
+                              ('adaptive_split_post_watershed_peak_fraction',p['foci']['post_watershed_peak_fraction'])]:
+            value=p['foci'][key].get(field,default)
+            if type(value) not in (int,float) or not math.isfinite(value) or value<0:
+                raise ValueError(f'foci.{key}.{field} must be a finite, nonnegative number')
+            if field in ['adaptive_split_prominence_fraction','adaptive_split_post_watershed_peak_fraction'] and value>1:
+                raise ValueError(f'foci.{key}.{field} must be between 0 and 1')
     return nuclear_channel,list(foci_channels)
 
 
@@ -511,14 +571,14 @@ def main():
             if r.percent_saturated_pixels_image>q['high_saturation_percent']:warn.append('SATURATION: container saturation exceeds limit')
             if r.median_foci_per_nucleus>q['high_median_foci_count']:warn.append(f'HIGH_FOCI_COUNT: median={r.median_foci_per_nucleus:g}')
             if r.median_foci_per_nucleus<q['low_median_foci_count']:warn.append(f'LOW_FOCI_COUNT: median={r.median_foci_per_nucleus:g}')
-            if mc and r.median_foci_per_nucleus<mc*q['count_fold_low_vs_dataset_median']:warn.append('LOW_RELATIVE_FOCI_COUNT: <0.25 times dataset median; may be biological')
-            if mc and r.median_foci_per_nucleus>mc*q['count_fold_high_vs_dataset_median']:warn.append('HIGH_RELATIVE_FOCI_COUNT: >4 times dataset median; may be biological')
+            if mc and r.median_foci_per_nucleus<mc*q['count_fold_low_vs_dataset_median']:warn.append(f'LOW_RELATIVE_FOCI_COUNT: <{q["count_fold_low_vs_dataset_median"]:g} times dataset median; may be biological')
+            if mc and r.median_foci_per_nucleus>mc*q['count_fold_high_vs_dataset_median']:warn.append(f'HIGH_RELATIVE_FOCI_COUNT: >{q["count_fold_high_vs_dataset_median"]:g} times dataset median; may be biological')
             if r.p95_focus_area_um2>q['large_focus_area_p95_um2']:warn.append(f'LARGE_OBJECTS: area P95={r.p95_focus_area_um2:.2f} um2')
             if r.median_focus_area_um2<q['small_median_focus_area_um2']:warn.append(f'SMALL_OBJECTS: median area={r.median_focus_area_um2:.3f} um2')
             if r.focus_intensity_p99_to_median>q['high_focus_intensity_p99_to_median_ratio']:warn.append(f'INTENSITY_TAIL: focus-mean P99/median={r.focus_intensity_p99_to_median:.2f}')
             if r.median_nuclear_area_fraction_occupied>q['dense_median_occupied_fraction']:warn.append(f'DENSE_FOCI: median occupied nuclear area={100*r.median_nuclear_area_fraction_occupied:.1f}%; inspect splits/merges')
-            if r.threshold_sensitivity_max_count_change_pct>q['threshold_sensitivity_percent']:warn.append(f'THRESHOLD_SENSITIVE: counts change up to {r.threshold_sensitivity_max_count_change_pct:.1f}% under uniform +/-20% thresholds')
-            if r.foci_rejected_too_large_count/max(r.candidate_foci_count,1)*100>q['large_rejected_fraction_percent']:warn.append('LARGE_REJECTED_OBJECTS: >5% candidate foci exceed maximum area')
+            if r.threshold_sensitivity_max_count_change_pct>q['threshold_sensitivity_percent']:warn.append(f'THRESHOLD_SENSITIVE: counts change up to {r.threshold_sensitivity_max_count_change_pct:.1f}% under configured sensitivity factors')
+            if r.foci_rejected_too_large_count/max(r.candidate_foci_count,1)*100>q['large_rejected_fraction_percent']:warn.append(f'LARGE_REJECTED_OBJECTS: >{q["large_rejected_fraction_percent"]:g}% candidate foci exceed maximum area')
             dfq.loc[ix,'manual_inspection_warnings']='; '.join(warn) if warn else 'No numerical QC rule triggered'
     image_rows=[]
     for m in mapping:
@@ -564,8 +624,13 @@ def main():
     pd.DataFrame(sensitivity).to_csv(out/'QC'/'Threshold_Sensitivity.csv',index=False)
     pd.DataFrame(thresholds).to_csv(out/'Methods'/'Applied_Thresholds.csv',index=False,float_format='%.10g')
     (out/'Methods'/'Image_Metadata.json').write_text(json.dumps(json_clean(metadata),indent=2))
+    try:
+        codec_version=version('imagecodecs')
+    except PackageNotFoundError:
+        codec_version=None
     run={'python':sys.version,'platform':platform.platform(),'numpy':np.__version__,'scipy':scipy.__version__,
          'skimage':skimage.__version__,'pandas':pd.__version__,'tifffile':tifffile.__version__,
+         'imagecodecs':codec_version,
          'run_utc':datetime.now(timezone.utc).isoformat(),'input_images':len(files),'nuclei_analyzed':len(dfc),
          'nuclear_channel':nuclear_channel,'foci_channels':foci_channels,'qc_output':args.qc_output,
          'rgb_channel_order':p.get('rgb_channel_order'),

@@ -5,8 +5,9 @@ images and explicitly mapped RGB TIFF exports. scikitORION segments nuclei, dete
 channels, records measurement provenance, produces quality-control material and
 reports, and validates the generated result tables.
 
-The pipeline is intentionally script-based: it can be copied into an analysis
-workspace without package installation or a project-specific runtime. Raw
+The pipeline can be used from the command line or an optional desktop GUI. The
+analysis scripts can be copied into an analysis workspace without package
+installation or a project-specific runtime. Raw
 images are read-only inputs and are never copied into an analysis output
 directory.
 
@@ -16,6 +17,7 @@ directory.
 - Input extensions `.tif` and `.tiff` are accepted in any letter case, including
   `.TIF` and `.TIFF`; files keep their original names. macOS `._` metadata
   companions on external drives are ignored.
+- LZW-compressed TIFFs are decoded through the included `imagecodecs` dependency.
 - Configurable nuclear segmentation and per-channel foci detection.
 - One-based command-line channel selection with saved run manifests.
 - Per-image, per-nucleus, and per-focus measurement tables.
@@ -85,6 +87,9 @@ python validate_results.py --output-dir Analyses/my_experiment
 Paths are resolved from your current working directory, not from the location
 of the scripts.
 
+The last two commands reuse the analysis's saved channel selections. See
+[CHANNELS.md](CHANNELS.md) for overrides, marker labels, and selecting subsets.
+
 ## Requirements and installation
 
 - Python 3.12 is the validated runtime for the pinned dependency set.
@@ -95,21 +100,116 @@ of the scripts.
   [CHANNELS.md](CHANNELS.md) for calibration sources and overrides.
 - Node.js is optional and is only needed for workbook generation.
 
-Install the Python dependencies in a virtual environment:
+Install the Python dependencies in a new Python 3.12 virtual environment:
 
 ```sh
-python -m venv .venv
+python3.12 -m venv .venv
 . .venv/bin/activate       # Windows PowerShell: .venv\Scripts\Activate.ps1
+python --version          # Must report Python 3.12 or newer
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
+```
+
+On Windows, create the environment with `py -3.12 -m venv .venv`.
+If `python3.12` is unavailable but Anaconda provides Python 3.12, use
+`/opt/anaconda3/bin/python3.12` on macOS.
+
+An error such as "No matching distribution found for numpy==2.5.3" with
+"Requires-Python >=3.12" means the active interpreter is too old. Check
+`python --version`; the terminal's `(.venv)` prompt does not identify its
+Python version. Recreating an environment over an older environment can leave
+its old Python executable in place. Use a new directory instead, or switch to
+the Python 3.12 GUI environment below if it is already installed:
+
+```sh
+deactivate
+. .venv-gui/bin/activate
+python --version
 ```
 
 The pinned versions in `requirements.txt` are deliberately recorded with each
 analysis output. Review and validate any dependency changes before using them
 for a production comparison.
 
-The last two commands reuse the analysis's saved channel selections. See
-[CHANNELS.md](CHANNELS.md) for overrides, marker labels, and selecting subsets.
+`imagecodecs` provides decoding for LZW-compressed TIFFs and is included in both
+the command-line and GUI dependency lists. If an existing environment reports
+"COMPRESSION.LZW requires the 'imagecodecs' package", reinstall the updated
+requirements in that environment and restart the GUI:
+
+```sh
+.venv-gui/bin/python -m pip install -r requirements-gui.txt
+.venv-gui/bin/python orion_gui.py
+```
+
+The compression format is independent of the filename's letter case. No TIFF
+conversion or renaming is needed. New runs record the decoder version in
+`Methods/Run_Manifest.json` and the generated `Methods/requirements.txt`.
+
+## Desktop GUI
+
+The optional Qt desktop application provides a resizable image workspace and a
+scrolling setup sidebar. Use Python 3.12 and a separate environment:
+
+```sh
+python3.12 -m venv .venv-gui
+.venv-gui/bin/python -m pip install -r requirements-gui.txt
+.venv-gui/bin/python orion_gui.py
+```
+
+On macOS, after this setup, double-click `launch_gui.command` to open the GUI.
+On Windows, activate the environment and run `python orion_gui.py`.
+You can also start with `--input-dir`, `--output-dir`, and `--parameters` options.
+
+1. Enter or browse to an input directory, an output directory, and a parameters
+   directory. **Load JSON** reads the named experiment file; **Save JSON…** saves
+   your edited configuration separately. The bundled template is loaded initially.
+2. Choose the nuclear channel and any foci channels independently. All selectors
+   use neutral labels (`Channel 1`, `Channel 2`, etc.); there is no fixed stain
+   assignment. For example, choose nuclear Channel 3 and foci Channels 1 and 2.
+   Images with more than three channels expand the available choices. Foci ADU
+   floors belong to their physical channel and appear for each selected channel.
+   A newly configured channel starts with zero floors, so noise thresholds apply
+   until you enter experiment-specific floors. Review these settings before a run.
+   For RGB TIFF exports, enable **Map RGB TIFF colors to channels** in Basic
+   parameters and choose a color for Channels 1, 2, and 3, using red, green, and
+   blue once each. For blue nuclei, green Channel 2, and red Channel 3, choose
+   Blue / Green / Red and nuclear Channel 1. Other assignments are equally valid;
+   nuclear and foci roles are selected separately. This mapping is saved as
+   `rgb_channel_order` in JSON and is used by both previews and full runs.
+   Channel stacks retain their original channel order.
+3. Choose automatic nuclear thresholding (the default) or an inclusive manual
+   ADU range. Expand **Advanced parameters** to edit the remaining numeric,
+   Boolean, metadata, and JSON-list settings. Fixed method descriptions remain
+   visible and read-only because changing that text would not change the algorithm.
+   `pixel_size_um` accepts a JSON list or `null`, matching the command-line
+   calibration override. Sensitivity factors
+   must retain 0.8 and 1.2 for the existing QC summary columns; extra factors may
+   be added. Generated methods describe the effective numerical settings.
+4. **Load images** discovers TIFF files and previews the first image. **Preview
+   image** computes real masks and measurements for the selected image without
+   saving output files. Switch between raw image, nuclei, foci, and overlay views;
+   toggle channels and outlines, zoom with the mouse wheel or buttons, and drag
+   to pan. Click a nucleus or use the inspector selector to see its area,
+   exclusions, foci counts, and applied thresholds. Display contrast changes only
+   the view, not the pixels used for detection. Edits invalidate old preview masks.
+5. **Run analysis** processes the whole input directory, generates the selected
+   QC/report detail, and validates the results in background processes. The log
+   shows progress and failures; **Stop** stops the active stage and preserves
+   partial output. A new run requires a new or empty output directory, separate
+   from the raw input directory. The loaded parameter file and raw TIFFs are
+   unchanged: the current settings are captured with the run in `Methods`.
+
+The GUI runs analysis, report generation, and validation as separate stages so
+each can be stopped. `Effective_Parameters.json` records analysis with automatic
+report generation off; `Output_Parameters.json` records the separately generated
+QC detail. **Results** displays cell measurements (up to 2,000 rows; full tables
+remain in CSV). **Load saved results** reads the output directory's saved table,
+and **Open report** opens its generated review in your browser. Saving parameters
+is always an explicit action.
+
+This first desktop version launches from Python; it is not yet packaged as a
+standalone installer. The original command-line workflow remains available
+without the Qt dependency.
 
 ## Fixed nuclear thresholds
 
@@ -131,6 +231,52 @@ descriptive text, not an executable expression.
 
 Changing nuclear thresholding requires rerunning `analyze_foci.py` to create
 new masks and measurements. Regenerating plots alone does not rerun detection.
+
+## Optional adaptive focus splitting
+
+When large bright foci split into multiple objects while higher blur or
+prominence loses small foci, enable adaptive splitting for the affected
+channel. Add these entries inside its existing `foci.channel_N` object:
+
+```json
+"adaptive_split_prominence_fraction": 0.30,
+"adaptive_split_minimum_peak_adu": 400.0,
+"adaptive_split_minimum_area_um2": 2.0,
+"adaptive_split_post_watershed_peak_fraction": 0.10
+```
+
+These are starting values tuned on the supplied IFPG46 channel-3 image, not
+universal defaults. The fraction is dimensionless and must be between 0 and
+1. It defaults to 0 (disabled), preserving the original segmentation. Missing
+brightness and area entries default to 100 ADU and 2 µm².
+
+The usual support, seed and absolute prominence thresholds first detect
+candidate peaks. Within a connected support region at least the configured
+area, secondary peaks at least the configured brightness must also survive
+a prominence threshold of `max(absolute prominence, fraction × that peak's
+background-corrected intensity)`. The region's strongest seed is retained.
+Faint peaks below the brightness cutoff and smaller support regions retain
+the original splitting rule. Thus the extra criterion targets shallow peaks
+within broad bright regions without increasing the global detection floor
+or smoothing. Separate bright peaks with sufficiently deep valleys remain
+separate; overlapping projected signals still require visual judgment.
+
+The optional `adaptive_split_post_watershed_peak_fraction` applies only to
+basins that receive a suppressed secondary peak. Lowering it preserves dimmer
+edges of a merged large focus without changing the trimming of other foci.
+It must be between 0 and 1; if omitted, the normal
+`foci.post_watershed_peak_fraction` is used. Its support-threshold floor and
+connected-component rule remain in effect. The tuned value above is 0.10;
+ordinary unmerged basins keep their original 0.25 setting.
+
+The GUI's **Advanced parameters** exposes these channel-specific entries
+when present in the loaded file. GUI previews and CLI runs use the same rule.
+`Methods/Applied_Thresholds.csv` and cell summaries record the enabled settings,
+number of secondary peaks tested/suppressed and maximum tested prominence.
+The existing `prominence_threshold_adu` remains the absolute baseline.
+Generated methods describe enabled channels and numerical settings. Threshold
+sensitivity varies the original absolute thresholds while adaptive settings
+stay fixed. Rerun segmentation after changing these parameters.
 
 ## Automatic QC and progress
 
@@ -248,6 +394,17 @@ cannot appear on a logarithmic intensity axis; the displayed density integral
 can therefore be below one. All-zero images are annotated and contribute zero
 to both averages. All scatter plots use the same small marker size, and
 treatment-axis labels are rotated 45 degrees and right aligned.
+
+The image-level endpoint panels and focus-positive nuclei figure use one box
+per combined `treatment_group`, calculated from saved image summaries. Boxes
+show the median and interquartile range (IQR); whiskers reach observations
+within 1.5 × IQR of the quartiles. Each valid image appears once per metric as
+a faint circular point (`s=8`, alpha 0.25), with reproducible horizontal jitter
+of ±0.16 and no text annotation. Separate outlier symbols are hidden because
+outliers already appear in the point overlay. Missing and nonfinite values
+are omitted per metric while treatment categories remain visible; a
+single-image group has a collapsed box and one point. The separate
+focus-positive percentage axis remains at 0–110%.
 
 Rerun `python make_outputs.py --output-dir /path/to/existing_analysis` to update
 plots and reports from saved measurements without repeating segmentation.

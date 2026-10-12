@@ -1,6 +1,9 @@
+# Requires Python 3.12 or newer. See README.md for environment setup.
 numpy==2.5.3
 scipy==1.18.1
 scikit-image==0.26.0
 pandas==3.0.6
 tifffile==2026.9.20
+imagecodecs==2026.8.16
 matplotlib==3.11.2
+PySide6-Essentials==6.10.2

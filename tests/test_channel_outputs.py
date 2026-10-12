@@ -112,9 +112,12 @@ class DownstreamChannelTests(unittest.TestCase):
             for component in ['siControl','100MMC','20PDS']:
                 self.assertFalse(component in labels or any(label.startswith(f'{component} (n=') for label in labels),path.name)
         positive=svg_text(out/'Plots/Channel_1/Focus_Positive_Nuclei.svg')
-        for im in ['I01','I02']:self.assertEqual(positive.count(f'{im}: 1/1 nuclei'),1)
         endpoints=svg_text(out/'Plots/Channel_1/Image_Level_Endpoints.svg')
-        for im in ['I01','I02']:self.assertEqual(endpoints.count(im),16)
+        for labels in [positive,endpoints]:
+            for im in ['I01','I02']:self.assertFalse(any(im in label for label in labels))
+            self.assertTrue(any('median and IQR' in label for label in labels))
+        self.assertIn('Faint circular points show individual images',review)
+        self.assertIn('whiskers extend to the most extreme observations',methods)
         ecdf=svg_text(out/'Plots/Channel_1/Distribution_ECDF.svg')
         for group in groups:
             self.assertEqual(ecdf.count(f'{group} (n=1)'),1)
@@ -182,6 +185,10 @@ class DownstreamChannelTests(unittest.TestCase):
                          *[cells[cells.treatment_group==groups[1]]]*101],ignore_index=True)
         focus=pd.concat([focus[focus.treatment_group==groups[0]],
                          *[focus[focus.treatment_group==groups[1]]]*101],ignore_index=True)
+        # Saved summaries, rather than the duplicated cell/focus rows, define the image points.
+        images=pd.concat([images[images.treatment_group==groups[0]],
+                          *[images[images.treatment_group==groups[1]]]*101],ignore_index=True)
+        images['image_id']=[f'I{i:03d}' for i in range(len(images))]
         names=[]
 
         def inspect(fig,folder,name):
@@ -200,11 +207,22 @@ class DownstreamChannelTests(unittest.TestCase):
                 if (name.startswith('Cellular_') or name=='Focus_Properties') and len(ax.collections):
                     self.assertEqual(ax.collections[0].get_alpha(),.65)
                     self.assertEqual(ax.collections[1].get_alpha(),.18)
+                if name in ['Image_Level_Endpoints','Focus_Positive_Nuclei']:
+                    self.assertEqual(len(ax.patches),2)
+                    self.assertEqual(len(ax.collections),2)
+                    self.assertEqual(len(ax.texts),0)
+                    for j,collection in enumerate(ax.collections):
+                        self.assertEqual(collection.get_alpha(),.25)
+                        offsets=collection.get_offsets()
+                        self.assertEqual(len(offsets),1 if j==0 else 101)
+                        self.assertTrue(np.all(np.abs(offsets[:,0]-j)<=.16))
+                        np.testing.assert_allclose(collection.get_facecolors()[0],
+                                                   outputs.matplotlib.colors.to_rgba(outputs.COLORS[j],.25))
+                    if name=='Focus_Positive_Nuclei':self.assertEqual(ax.get_ylim(),(0,110))
             outputs.plt.close(fig)
 
         with patch.object(outputs,'GROUPS',groups),patch.object(outputs,'LABELS',groups), \
                 patch.object(outputs,'COLORS',['#0072B2','#D55E00']), \
-                patch.object(outputs,'MARKERS',{'I01':'s','I02':'o'}), \
                 patch.object(outputs,'figsave',side_effect=inspect), \
                 patch.object(outputs,'make_input_intensity_plots'):
             outputs.make_plots(out,cells,focus,images,resolve_channels(out))

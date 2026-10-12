@@ -7,9 +7,9 @@
     3
   ],
   "channels": {
-    "1": "Nuclear stain",
-    "2": "Focus marker 2",
-    "3": "Focus marker 3"
+    "1": "Channel 1",
+    "2": "Channel 2",
+    "3": "Channel 3"
   },
   "channel_identity_source": "Set channel labels and numbers for this experiment before analysis",
   "exposure_gain": "Not specified; record acquisition settings for this experiment",
@@ -46,12 +46,18 @@
     "channel_2": {
       "support_floor_adu": 15.0,
       "seed_floor_adu": 30.0,
-      "prominence_floor_adu": 15.0
+      "prominence_floor_adu": 15.0,
+      "adaptive_split_prominence_fraction": 0.0,
+      "adaptive_split_minimum_peak_adu": 100.0,
+      "adaptive_split_minimum_area_um2": 2.0
     },
     "channel_3": {
       "support_floor_adu": 6.0,
       "seed_floor_adu": 12.0,
-      "prominence_floor_adu": 6.0
+      "prominence_floor_adu": 6.0,
+      "adaptive_split_prominence_fraction": 0.0,
+      "adaptive_split_minimum_peak_adu": 100.0,
+      "adaptive_split_minimum_area_um2": 2.0
     },
     "threshold_rule": "Each threshold is max(channel floor, multiplier * estimated smoothed noise); identical rule across all images and nuclei within a channel",
     "connectivity": 2,

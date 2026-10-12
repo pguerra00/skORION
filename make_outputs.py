@@ -20,7 +20,6 @@ from image_io import read_channels
 GROUPS=['20PDS','100MMC','ART558_20PDS']
 LABELS=['20PDS','100MMC','ART558 + 20PDS']
 COLORS=['#0072B2','#D55E00','#009E73']
-MARKERS={'I01':'s','I02':'o','I03':'^'}
 STYLE={'font.family':'DejaVu Sans','font.size':10,'axes.titlesize':11,'axes.labelsize':10,
        'axes.spines.top':False,'axes.spines.right':False,'svg.fonttype':'none','savefig.facecolor':'white'}
 plt.rcParams.update(STYLE)
@@ -186,18 +185,22 @@ def treatment_ticks(ax,fontsize=8):
                   rotation=45,ha='right',rotation_mode='anchor')
 
 
-def stripbox(ax,df,col,ylabel,rng,log=False):
+def stripbox(ax,df,col,ylabel,rng,log=False,point_alpha=None):
     for j,g in enumerate(GROUPS):
-        vals=df.loc[df.treatment_group==g,col].dropna().to_numpy(float)
+        vals=pd.to_numeric(df.loc[df.treatment_group==g,col],errors='coerce').to_numpy(float)
+        vals=vals[np.isfinite(vals)]
         if not len(vals):continue
-        bp=ax.boxplot([vals],positions=[j],widths=.40,showfliers=False,patch_artist=True,
+        ax.boxplot([vals],positions=[j],widths=.40,whis=1.5,showfliers=False,patch_artist=True,
                       boxprops={'facecolor':COLORS[j]+'25','edgecolor':COLORS[j]},medianprops={'color':'#222222','linewidth':1.5},
                       whiskerprops={'color':COLORS[j]},capprops={'color':COLORS[j]})
         ax.scatter(j+rng.uniform(-.16,.16,len(vals)),vals,s=SCATTER_SIZE,
-                   color=COLORS[j],alpha=.65 if len(vals)<100 else .18,edgecolors='none',rasterized=True)
+                   color=COLORS[j],marker='o',
+                   alpha=point_alpha if point_alpha is not None else (.65 if len(vals)<100 else .18),
+                   edgecolors='none',rasterized=True,zorder=3 if point_alpha is not None else 1)
     treatment_ticks(ax)
     ax.set_ylabel(ylabel);ax.grid(axis='y',alpha=.16)
-    if log and (pd.to_numeric(df[col],errors='coerce')>0).any():ax.set_yscale('log')
+    numeric=pd.to_numeric(df[col],errors='coerce')
+    if log and (np.isfinite(numeric)&(numeric>0)).any():ax.set_yscale('log')
     elif ax.get_ylim()[0]>0:ax.set_ylim(bottom=0)
 
 
@@ -242,14 +245,14 @@ def make_plots(out,cell,focus,image,p):
                  ('mean_focus_to_background_ratio','Mean focus / local background'),('mean_eccentricity','Mean focus eccentricity'),('mean_aspect_ratio','Mean focus aspect ratio')]
         fig,axs=plt.subplots(4,4,figsize=(18,16),layout='constrained')
         for ax,(key,label) in zip(axs.flat,metrics):
-            for j,g in enumerate(GROUPS):
-                for _,r in image[image.treatment_group==g].iterrows():
-                    val=r[f'C{c}_{key}'];ax.scatter(j,val,c=COLORS[j],s=SCATTER_SIZE,marker=MARKERS[r.image_id],zorder=4)
-                    ax.annotate(r.image_id,(j,val),xytext=(0,8),textcoords='offset points',ha='center',fontsize=8)
-            treatment_ticks(ax);ax.set_xlim(-.5,len(GROUPS)-.5);ax.set_ylabel(label);ax.grid(axis='y',alpha=.16)
-            maximum=float(image[f'C{c}_{key}'].max())
-            ax.set_ylim(bottom=0,top=max(maximum*1.22,.01) if np.isfinite(maximum) else 1)
-        fig.suptitle(f'Channel {c} · {name} · image-level comparisons\nEach point is one image. Descriptive comparisons; nuclei are nested observations.',fontsize=14)
+            col=f'C{c}_{key}'
+            stripbox(ax,image,col,label,rng,point_alpha=.25)
+            ax.set_xlim(-.5,len(GROUPS)-.5)
+            vals=pd.to_numeric(image[col],errors='coerce').to_numpy(float)
+            vals=vals[np.isfinite(vals)]
+            ax.set_ylim(bottom=min(0,float(vals.min())*1.1) if len(vals) else 0,
+                        top=max(float(vals.max())*1.22,.01) if len(vals) else 1)
+        fig.suptitle(f'Channel {c} · {name} · image-level comparisons\nBoxes: median and IQR; whiskers: observations within 1.5 × IQR. Faint points: individual images.\nDescriptive comparisons; nuclei are nested observations.',fontsize=14)
         figsave(fig,folder,'Image_Level_Endpoints')
         fig,axs=plt.subplots(1,3,figsize=(15,4.8),layout='constrained')
         for ax,df,key,label,lg in [(axs[0],cell,f'C{c}_foci_count','Foci per nucleus',False),
@@ -265,13 +268,9 @@ def make_plots(out,cell,focus,image,p):
         fig.suptitle(f'Channel {c} · {name} · distribution curves\nNucleus/focus counts label the observed distributions, not biological replicate counts.',fontsize=12)
         figsave(fig,folder,'Distribution_ECDF')
         fig,ax=plt.subplots(figsize=(7.5,5),layout='constrained')
-        for j,g in enumerate(GROUPS):
-            for _,r in image[image.treatment_group==g].iterrows():
-                v=r[f'C{c}_percent_focus_positive_nuclei']
-                n=int(r.nuclei_analyzed);pos=int(cell.loc[(cell.image_id==r.image_id)&(cell.treatment_group==g),f'C{c}_focus_positive'].sum())
-                ax.scatter(j,v,s=SCATTER_SIZE,marker=MARKERS[r.image_id],color=COLORS[j]);ax.annotate(f'{r.image_id}: {pos}/{n} nuclei\n{v:.1f}%',(j,v),xytext=(0,-35),textcoords='offset points',ha='center',fontsize=10)
+        stripbox(ax,image,f'C{c}_percent_focus_positive_nuclei','Focus-positive nuclei (%)',rng,point_alpha=.25)
         treatment_ticks(ax,fontsize=10);ax.set_xlim(-.5,len(GROUPS)-.5);ax.set_ylim(0,110);ax.set_ylabel('Focus-positive nuclei (%)');ax.grid(axis='y',alpha=.2)
-        ax.set_title(f'Channel {c} · {name} · focus-positive nuclei\nOne point per image; no biological replicates')
+        ax.set_title(f'Channel {c} · {name} · focus-positive nuclei\nBoxes: median and IQR; whiskers: within 1.5 × IQR.\nFaint points: individual images; no biological replicates')
         figsave(fig,folder,'Focus_Positive_Nuclei')
     mapping=pd.read_csv(out/'Methods'/'Treatment_Group_Mapping.csv')
     make_input_intensity_plots(out/'QC',mapping,p)
@@ -395,6 +394,8 @@ def definition(col):
     channel=''
     match=re.match(r'^C(\d+)_(.*)$',s)
     if match:channel=f'Channel {match[1]}: ';s=match[2]
+    if s.startswith('adaptive_split_'):
+        return channel+'Adaptive secondary-seed pruning setting/statistic for this nucleus. Applied_Thresholds.csv records brightness/area gates, relative prominence fraction, seeds tested/suppressed and maximum tested prominence. The baseline absolute prominence is recorded separately.'
     if s=='foci_count':return channel+'Number of accepted objects assigned to the nucleus, including zero.'
     if s=='focus_positive':return channel+'1 when count >=1; otherwise 0.'
     if s=='nuclear_area_fraction_occupied':return channel+'Sum of accepted focus areas / nuclear area; fraction from 0 to 1.'
@@ -435,6 +436,8 @@ def build_methods(out,p,mapping,images,cell,focus,qc):
     versions=json.loads((out/'Methods'/'Run_Manifest.json').read_text())
     requirements=[f'numpy=={versions["numpy"]}',f'scipy=={versions["scipy"]}',f'scikit-image=={versions["skimage"]}',
                   f'pandas=={versions["pandas"]}',f'tifffile=={versions["tifffile"]}',f'matplotlib=={matplotlib.__version__}']
+    if versions.get('imagecodecs'):
+        requirements.append(f'imagecodecs=={versions["imagecodecs"]}')
     (out/'Methods'/'requirements.txt').write_text('\n'.join(requirements)+'\n')
     channels=', '.join(f'C{c} ({marker_name(p,c)})' for c in p['foci_channels'])
     nuclear=f"C{p['nuclear_channel']} ({marker_name(p,p['nuclear_channel'])})"
@@ -450,7 +453,27 @@ def build_methods(out,p,mapping,images,cell,focus,qc):
               if rgb_inputs else '')
     rgb_option=' --rgb-channel-order '+' '.join(p['rgb_channel_order']) if rgb_inputs else ''
     calibration_option=' --pixel-size-um '+' '.join(map(str,p['pixel_size_um'])) if p.get('pixel_size_um') else ''
-    np_cfg=p['nuclear'];fixed=np_cfg.get('fixed_threshold_adu')
+    np_cfg=p['nuclear'];fp=p['foci'];fixed=np_cfg.get('fixed_threshold_adu')
+    hole_description='internal holes are filled' if np_cfg.get('fill_holes',True) else 'internal holes are retained'
+    disk_description=(f'approximate disk (scikit-image {fp["background_disk_decomposition"]} decomposition'
+                      if fp['background_disk_decomposition'] else 'exact disk (no decomposition')
+    watershed_description=('Watershed boundaries are left unassigned so adjacent objects remain separable.'
+                           if fp['watershed_lines'] else 'Watershed boundaries are assigned to adjacent basins.')
+    sensitivity_factors=' and '.join(f'{v:g}' for v in fp['sensitivity_threshold_factors'] if v!=1)
+    adaptive_channels=[]
+    for c in p['foci_channels']:
+        q=fp[f'channel_{c}'];fraction=q.get('adaptive_split_prominence_fraction',0)
+        if fraction:
+            adaptive_channels.append(f"C{c}: fraction {fraction:g}, minimum corrected peak {q.get('adaptive_split_minimum_peak_adu',100):g} ADU, minimum connected support area {q.get('adaptive_split_minimum_area_um2',2):g} µm², merged-basin trimming at {100*q.get('adaptive_split_post_watershed_peak_fraction',fp['post_watershed_peak_fraction']):g}% of its corrected peak")
+    adaptive_description=('Adaptive splitting is enabled for '+('; '.join(adaptive_channels))+'. '
+                          'After the usual thresholds establish candidate peaks, eligible secondary peaks in sufficiently large connected support regions must survive h-maxima at max(absolute prominence, fraction times their own corrected peak intensity). '
+                          'Each support region retains its strongest original seed; peaks below the brightness cutoff and smaller regions retain the original rule. '
+                          'An optional adaptive_split_post_watershed_peak_fraction overrides the normal basin trimming only for basins that receive suppressed secondary seeds; the support floor and connected-component rule still apply. '
+                          'Applied_Thresholds.csv and cell summaries record enabled settings, secondary peaks tested/suppressed and the maximum tested prominence. '
+                          'prominence_threshold_adu remains the absolute baseline; the adaptive criterion only suppresses secondary seeds before watershed and does not raise the common detection floor. '
+                          'Threshold sensitivity changes the original absolute thresholds while these adaptive settings stay fixed.'
+                          if adaptive_channels else
+                          'Adaptive focus splitting is disabled for all selected channels (missing or zero adaptive_split_prominence_fraction); the original absolute-prominence rule is used.')
     if fixed is not None:
         nuclear_threshold_description=(f'Initial nuclear foreground uses the fixed inclusive range {fixed[0]:g}–{fixed[1]:g} ADU '
                                        'on the original nuclear-channel pixels, identically for every image. '
@@ -474,25 +497,27 @@ Inputs are read as calibrated 2D channel planes in CYX order. Source layout, cha
 Configured group_names use case-insensitive literal substring matching against the filename without its extension. Every matching name is retained in the group_names JSON-list column; treatment_group displays their combination in configuration order. Without configured names, the legacy filename parser is used. Unmatched images remain AMBIGUOUS. Every comparison uses treatment_group as its category: each image, nucleus, and focus contributes once to its combined treatment group. number_images_in_treatment counts images with the same full combination of labels.
 
 ## Nuclear segmentation
-{nuclear_threshold_description} Closing uses a 3 px disk and internal holes are filled. Components below 1,000 px are discarded as debris before the candidate list. A distance transform smoothed at sigma 3 px supplies h-maxima (height 10 px, edge distance >20 px) for watershed splitting. A connected candidate without such a seed receives its greatest-distance pixel as a seed, allowing border fragments to be audited.
+{nuclear_threshold_description} Closing uses a {np_cfg['closing_disk_radius_px']:g} px disk and {hole_description}. Components below {np_cfg['candidate_min_area_px']:,} px are discarded as debris before the candidate list. A distance transform smoothed at sigma {np_cfg['distance_smoothing_sigma_px']:g} px supplies h-maxima (height {np_cfg['distance_h_maxima_px']:g} px, edge distance >{np_cfg['minimum_seed_distance_to_edge_px']:g} px) for watershed splitting. A connected candidate without such a seed receives its greatest-distance pixel as a seed, allowing border fragments to be audited.
 
-Candidates from 25 to 500 square microns are retained unless their bounding box intersects a 2 px image-edge buffer. This deliberately excludes all border-touching nuclei, including potentially mildly truncated ones. Exclusion percentage uses the post-debris, post-watershed candidate count as denominator. Nuclear masks retain candidate label IDs. Objects below the debris prefilter are not included in this denominator. Nuclear solidity <0.85 or aspect ratio >3 generates an inspection warning only; such nuclei remain in the analysis. Nucleus_Inclusion_Audit.csv records every candidate and exclusion reason. No manual mask edits were made.
+Candidates from {np_cfg['accepted_min_area_um2']:g} to {np_cfg['accepted_max_area_um2']:g} square microns are retained unless their bounding box intersects a {np_cfg['image_edge_buffer_px']:g} px image-edge buffer. This deliberately excludes all border-touching nuclei, including potentially mildly truncated ones. Exclusion percentage uses the post-debris, post-watershed candidate count as denominator. Nuclear masks retain candidate label IDs. Objects below the debris prefilter are not included in this denominator. Nuclear solidity <{np_cfg['shape_warning_solidity_below']:g} or aspect ratio >{np_cfg['shape_warning_aspect_ratio_above']:g} generates an inspection warning only; such nuclei remain in the analysis. Nucleus_Inclusion_Audit.csv records every candidate and exclusion reason. No manual mask edits were made.
 
 ## Foci segmentation
 The same numerical parameters and automatic rule apply to every image within a channel. Thresholds and segmentation settings come from the saved analysis parameters. This is exploratory segmentation, not a blinded or ground-truth-validated detector.
 
-Original intensities are lightly smoothed (Gaussian sigma 1 px). Background is a grayscale opening with a radius 12 px approximate disk (scikit-image sequence decomposition; physical size depends on pixel calibration). The difference between smooth image and opening supplies the detection signal. Structures larger than this background scale can be attenuated; the result measures discrete puncta rather than diffuse or pan-nuclear staining.
+Original intensities are lightly smoothed (Gaussian sigma {fp['gaussian_sigma_px']:g} px). Background is a grayscale opening with a radius {fp['background_disk_radius_px']:g} px {disk_description}; physical size depends on pixel calibration). The difference between smooth image and opening supplies the detection signal. Structures larger than this background scale can be attenuated; the result measures discrete puncta rather than diffuse or pan-nuclear staining.
 
 Per-nucleus noise sigma is 1.4826 x MAD of (I00 - I10 - I01 + I11)/2 on 2x2 windows fully inside the nucleus. Approximate noise after Gaussian smoothing is sigma_raw / (2 sqrt(pi) sigma_gaussian). This estimate is a reproducible noise proxy, not a calibrated photon model or statistical error rate.
 
-Support threshold = max(channel floor, 3 x sigma_smooth). Seed threshold = max(channel floor, 6 x sigma_smooth). Peak prominence = max(channel floor, 3 x sigma_smooth). Selected channel floors are {floors}. Applied per-nucleus values are saved in Applied_Thresholds.csv. H-maxima establish seeds; watershed on the negative corrected image segments actual pixel objects inside support masks. Local maxima alone are never counted. Watershed boundaries are left unassigned so adjacent objects remain separable. Each basin is trimmed at max(support threshold, 25% of its corrected peak), and only the connected component containing that peak is retained.
+Support threshold = max(channel floor, {fp['support_noise_multiplier']:g} x sigma_smooth). Seed threshold = max(channel floor, {fp['seed_noise_multiplier']:g} x sigma_smooth). Peak prominence = max(channel floor, {fp['prominence_noise_multiplier']:g} x sigma_smooth). Selected channel floors are {floors}. Applied per-nucleus values are saved in Applied_Thresholds.csv. H-maxima establish seeds; watershed on the negative corrected image segments actual pixel objects inside support masks. Local maxima alone are never counted. {watershed_description} Each basin is trimmed at max(support threshold, {100*fp['post_watershed_peak_fraction']:g}% of its corrected peak), and only the connected component containing that peak is retained.
 
-Objects require at least 9 pixels (physical area depends on pixel calibration), at most 25 square microns, and raw mean minus local background >=2 x per-nucleus raw noise sigma. No shape-based focus exclusion is applied. Dense neighboring foci with insufficient prominence remain merged. The detector may miss faint objects below the common noise/contrast limits. Focus_Candidate_Audit.csv records size and contrast exclusions; subthreshold unseeded signal does not enter this audit. Counted foci are constrained to usable nuclei. Boundary-touching focus objects are retained with a flag. Excluded nuclei and extranuclear puncta are not part of the per-nucleus primary counts.
+{adaptive_description}
+
+Objects require at least {fp['minimum_area_px']:g} pixels (physical area depends on pixel calibration), at most {fp['maximum_area_um2']:g} square microns, and raw mean minus local background >={fp['net_mean_noise_multiplier']:g} x per-nucleus raw noise sigma. No shape-based focus exclusion is applied. Dense neighboring foci with insufficient prominence remain merged. The detector may miss faint objects below the common noise/contrast limits. Focus_Candidate_Audit.csv records size and contrast exclusions; subthreshold unseeded signal does not enter this audit. Counted foci are constrained to usable nuclei. Boundary-touching focus objects are retained with a flag. Excluded nuclei and extranuclear puncta are not part of the per-nucleus primary counts.
 
 ## Local background and measurements
-The local background region is an annulus at Euclidean pixel distances >2 and <=8 from the segmented object, limited to its own nucleus and excluding all provisional foci dilated by 1 px. Provisional includes objects later rejected by size/contrast, avoiding their reuse as background. At least 20 annular pixels are required. Otherwise all eligible nonfocus pixels in the same nucleus are used; if still insufficient, the opening background over the object is used. Background source and sample size are preserved.
+The local background region is an annulus at Euclidean pixel distances >{fp['annulus_inner_gap_px']:g} and <={fp['annulus_outer_radius_px']:g} from the segmented object, limited to its own nucleus and excluding all provisional foci dilated by 1 px. Provisional includes objects later rejected by size/contrast, avoiding their reuse as background. At least {fp['annulus_min_pixels']:g} annular pixels are required. Otherwise all eligible nonfocus pixels in the same nucleus are used; if still insufficient, the opening background over the object is used. Background source and sample size are preserved.
 
-Measurements use the original unsmoothed pixels. Raw mean/median/min/max/sum, opening-corrected versions, and local-background-corrected versions are saved. Corrected pixels are not clipped to zero. Integrated intensity is ADU x pixel, not calibrated molecular abundance. Focus/background = raw mean / local median. Local signal/background = (raw mean - local median)/local median. Local contrast SNR uses the annulus robust MAD sigma in the denominator, distinct from the noise estimate used in filtering. Dataset background is measured outside all candidate nuclei after 15 px dilation.
+Measurements use the original unsmoothed pixels. Raw mean/median/min/max/sum, opening-corrected versions, and local-background-corrected versions are saved. Corrected pixels are not clipped to zero. Integrated intensity is ADU x pixel, not calibrated molecular abundance. Focus/background = raw mean / local median. Local signal/background = (raw mean - local median)/local median. Local contrast SNR uses the annulus robust MAD sigma in the denominator, distinct from the noise estimate used in filtering. Dataset background is measured outside all candidate nuclei after {p['qc']['extranuclear_background_exclusion_dilation_px']:g} px dilation.
 
 Equivalent diameter is the diameter of a circle of equal segmented area. Major/minor axes derive from region second moments; calibrated axes are recomputed after scaling X and Y. Circularity uses 4*pi*area/perimeter_Crofton^2 (four directions); pixelation may yield values >1, and these are retained. Small-focus morphology is resolution limited. Solidity is area/convex area. Unweighted centroids use zero-based pixel centers, X=column and Y=row. Relative radial position is d_centroid / (d_centroid + nearest_edge_distance), in physical units. It is 0 at the centroid and approaches 1 at the boundary; it is not a ray-based or equal-area nuclear coordinate.
 
@@ -507,10 +532,12 @@ Saturation uses each input dtype's maximum stored value: 255 for uint8, 65535 fo
 
 QC_Summary.csv reports fixed numerical and dataset-relative flags, with exact cutoffs in Output_Parameters.json. These include nuclear counts/exclusions, shape concerns, background, saturation, count extremes, size extremes, intensity tails, contrast, density and threshold sensitivity. Flags request inspection and never exclude images. Dataset-relative heuristics have limited reliability with few images. Genuine treatment biology can trigger a flag.
 
-Threshold sensitivity reruns each nucleus at common factors 0.8 and 1.2 applied to support, seed, prominence and net-mean contrast thresholds, with all other rules fixed. It is reported separately from the primary factor-1 masks and tables. Because splitting and contrast checks interact, counts need not be strictly monotonic with threshold factor. Sensitivity quantifies technical dependence; it does not estimate detection accuracy or a confidence interval.
+Threshold sensitivity reruns each nucleus at common factors {sensitivity_factors} applied to support, seed, prominence and net-mean contrast thresholds, with all other rules fixed. It is reported separately from the primary factor-1 masks and tables. Because splitting and contrast checks interact, counts need not be strictly monotonic with threshold factor. Sensitivity quantifies technical dependence; it does not estimate detection accuracy or a confidence interval.
 
 ## Treatment comparisons and limits
 The experimental structure is focus -> nucleus -> image -> treatment. The reports are descriptive: no hypothesis tests, p-values, biological confidence intervals or multiple-comparison correction are reported. Replicate structure must be assessed from the experiment metadata. Cellular/focus distribution plots visualize heterogeneity only. Image-level plots preserve the experimental hierarchy. The observed treatment ranking cannot establish a reproducible biological treatment effect.
+
+Image_Level_Endpoints and Focus_Positive_Nuclei use saved image-level measurements, grouped by combined treatment_group. Boxes show the median and interquartile range (IQR); whiskers extend to the most extreme observations within 1.5 times the IQR of the quartiles. Separate outlier symbols are hidden because every valid image appears once per metric as a circular point (size 8 points squared, alpha 0.25), with reproducible horizontal jitter within ±0.16 of its treatment position. Points have no image ID, count or percentage annotations. Missing and nonfinite values are omitted per metric while their treatment categories remain visible. A single-image group has a collapsed box and one point. Treatment labels are rotated 45 degrees and right aligned; the separate focus-positive percentage axis spans 0–110%.
 
 This analysis measures objects in 2D projections, not 3D foci: overlap in Z can merge distinct foci and alter areas. Signal background subtraction, thresholds, resolution and the field selected affect counts. No cross-channel colocalization or biological comparison is performed. Nuclear annotation and focus ground truth would be needed to estimate precision/recall and validate absolute counts.
 
@@ -577,6 +604,7 @@ body{font:16px/1.55 system-ui,Arial;color:#203043;background:#f7f9fb;max-width:1
     for c in p['foci_channels']:
         body+=f'<article><h3>Channel {c} · '+esc(marker_name(p,c))+'</h3>'
         body+=f'<a href="Plots/Channel_{c}/Image_Level_Endpoints.png"><img loading="lazy" src="Plots/Channel_{c}/Image_Level_Endpoints.png"></a>'
+        body+='<p>Image-level comparisons and Focus Positive Nuclei: boxes show the median and interquartile range; whiskers reach observations within 1.5 × IQR of the quartiles. Faint circular points show individual images, including outliers, once per valid metric. Missing or nonfinite values are omitted.</p>'
         for f in ['Cellular_Abundance_Size','Cellular_Intensity_Contrast','Cellular_Morphology','Focus_Properties','Distribution_ECDF','Focus_Positive_Nuclei']:
             body+=f'<p><a href="Plots/Channel_{c}/{f}.png">{f.replace("_"," ")}</a> · <a href="Plots/Channel_{c}/{f}.svg">editable SVG</a></p>'
         body+='<details><summary>Shared-contrast raw fields</summary>'
@@ -637,12 +665,11 @@ def main():
     if 'qc_flags' in images:
         images['qc_flags']=images.apply(lambda row:' | '.join(f'C{c}: {row[f"C{c}_qc_flags"]}' for c in channels),axis=1)
     focus=focus[focus.channel.isin(channels)];qc=qc[qc.channel.isin(channels)]
-    # Derive groups and image symbols from this run rather than the pilot dataset.
-    global GROUPS,LABELS,COLORS,MARKERS
+    # Derive treatment groups and colors from this run rather than the pilot dataset.
+    global GROUPS,LABELS,COLORS
     GROUPS=list(mapping.treatment_group.unique());LABELS=[g.replace('ART558_20PDS','ART558 + 20PDS') for g in GROUPS]
     palette=['#0072B2','#D55E00','#009E73','#CC79A7','#E69F00','#56B4E9','#000000']
     COLORS=[palette[i%len(palette)] for i in range(len(GROUPS))]
-    MARKERS={im:['s','o','^','D','v','P','X'][i%7] for i,im in enumerate(mapping.image_id)}
     (out/'Methods'/'Output_Parameters.json').write_text(json.dumps(p,indent=2))
     make_qc(out,mapping,cell,focus,p)
     make_plots(out,cell,focus,images,p)
