@@ -93,6 +93,7 @@ The last two commands reuse the analysis's saved channel selections. See
 ## Requirements and installation
 
 - Python 3.12 is the validated runtime for the pinned dependency set.
+- Windows setup below targets Windows 10/11 with x86-64 Python 3.12.
 - A calibrated multichannel ImageJ/OME TIFF with `CYX` axes, or a calibrated 2D RGB
   TIFF with an explicit color-to-channel mapping, is required.
 - If physical pixel size was lost during export, supply the acquisition
@@ -100,17 +101,53 @@ The last two commands reuse the analysis's saved channel selections. See
   [CHANNELS.md](CHANNELS.md) for calibration sources and overrides.
 - Node.js is optional and is only needed for workbook generation.
 
+### Windows: double-click setup and launch
+
+1. Install **Python 3.12, Windows installer (64-bit)** from
+   [python.org](https://www.python.org/downloads/windows/). Include the Python
+   launcher, or select **Add Python to PATH** during installation.
+2. Download or copy the project folder to your Windows computer. If downloading
+   a ZIP, extract it first. Keep the scripts, `requirements.txt`, and
+   `parameters.template.json` together. Python environments such as `.venv`
+   and `.venv-gui` must be created on Windows rather than copied from a Mac.
+3. Double-click **`setup_windows.bat`**. It creates `.venv-gui` and installs
+   the pinned analysis and GUI dependencies. Internet access is required for
+   setup; no terminal activation or PowerShell policy change is needed.
+4. Once setup finishes, double-click **`launch_gui.bat`** whenever you want to
+   open scikitORION. The launcher works with spaces and Unicode in folder names.
+   Use the GUI's Browse buttons to select your images, parameters, and output.
+
+If setup finds an incompatible `.venv-gui` folder, rename it and rerun setup.
+If installation or launch fails, the window stays open with the error message.
+Rerun `setup_windows.bat` after updating the project's dependencies. The
+environment belongs to its current folder; rerun setup if you move the project.
+
+For command-line analysis in Windows PowerShell, use the same environment
+directly, with quoted paths:
+
+```powershell
+.\.venv-gui\Scripts\python.exe -X utf8 .\analyze_foci.py --input-dir "C:\Data\My TIFFs" --parameters "C:\Data\experiment.json" --output-dir "C:\Data\ORION Results" --qc-output minimal
+.\.venv-gui\Scripts\python.exe -X utf8 .\validate_results.py --output-dir "C:\Data\ORION Results"
+```
+
+`--qc-output minimal` also generates plots and reports. JSON configuration,
+Markdown methods, and HTML reports use UTF-8 on every platform, preserving
+scientific symbols and non-English labels. GUI background stages also use UTF-8.
+
+### Manual setup
+
 Install the Python dependencies in a new Python 3.12 virtual environment:
 
 ```sh
 python3.12 -m venv .venv
 . .venv/bin/activate       # Windows PowerShell: .venv\Scripts\Activate.ps1
-python --version          # Must report Python 3.12 or newer
+python --version          # Validated with Python 3.12
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-On Windows, create the environment with `py -3.12 -m venv .venv`.
+For manual Windows setup, run `py -3.12 -m venv .venv` and then
+`.\.venv\Scripts\python.exe -m pip install -r requirements.txt`.
 If `python3.12` is unavailable but Anaconda provides Python 3.12, use
 `/opt/anaconda3/bin/python3.12` on macOS.
 
@@ -131,13 +168,13 @@ The pinned versions in `requirements.txt` are deliberately recorded with each
 analysis output. Review and validate any dependency changes before using them
 for a production comparison.
 
-`imagecodecs` provides decoding for LZW-compressed TIFFs and is included in both
-the command-line and GUI dependency lists. If an existing environment reports
+`imagecodecs` provides decoding for LZW-compressed TIFFs and is included in
+`requirements.txt`, which installs both analysis and GUI dependencies. If an existing environment reports
 "COMPRESSION.LZW requires the 'imagecodecs' package", reinstall the updated
 requirements in that environment and restart the GUI:
 
 ```sh
-.venv-gui/bin/python -m pip install -r requirements-gui.txt
+.venv-gui/bin/python -m pip install -r requirements.txt
 .venv-gui/bin/python orion_gui.py
 ```
 
@@ -147,17 +184,18 @@ conversion or renaming is needed. New runs record the decoder version in
 
 ## Desktop GUI
 
-The optional Qt desktop application provides a resizable image workspace and a
-scrolling setup sidebar. Use Python 3.12 and a separate environment:
+The Qt desktop application provides a resizable image workspace and a
+scrolling setup sidebar. On Windows, use the double-click setup and launcher
+above. On macOS/Linux, use Python 3.12 and a separate environment:
 
 ```sh
 python3.12 -m venv .venv-gui
-.venv-gui/bin/python -m pip install -r requirements-gui.txt
+.venv-gui/bin/python -m pip install -r requirements.txt
 .venv-gui/bin/python orion_gui.py
 ```
 
 On macOS, after this setup, double-click `launch_gui.command` to open the GUI.
-On Windows, activate the environment and run `python orion_gui.py`.
+On Windows, double-click `launch_gui.bat` after running `setup_windows.bat`.
 You can also start with `--input-dir`, `--output-dir`, and `--parameters` options.
 
 1. Enter or browse to an input directory, an output directory, and a parameters
@@ -187,11 +225,18 @@ You can also start with `--input-dir`, `--output-dir`, and `--parameters` option
    be added. Generated methods describe the effective numerical settings.
 4. **Load images** discovers TIFF files and previews the first image. **Preview
    image** computes real masks and measurements for the selected image without
-   saving output files. Switch between raw image, nuclei, foci, and overlay views;
+   saving output files. Use the **Raw image**, **Nuclei**, **Foci**, and **Overlay**
+   tabs above the viewer to switch views while retaining zoom and pan;
    toggle channels and outlines, zoom with the mouse wheel or buttons, and drag
    to pan. Click a nucleus or use the inspector selector to see its area,
-   exclusions, foci counts, and applied thresholds. Display contrast changes only
-   the view, not the pixels used for detection. Edits invalidate old preview masks.
+   exclusions, foci counts, and applied thresholds. Expand **Channel colors**
+   below the viewer to choose independent signal/mask and outline pseudocolors
+   for each channel. Color changes redraw immediately, retain computed masks,
+   and stay with the channel when its nuclear/foci role changes. **Save JSON…**
+   stores the colors under `gui_display`; **Load JSON** restores them. **Reset
+   colors** restores the default palette. Display colors and contrast affect
+   only the GUI view; exported reports use their existing palette, and detection
+   uses the original pixels. Analysis parameter edits invalidate old preview masks.
 5. **Run analysis** processes the whole input directory, generates the selected
    QC/report detail, and validates the results in background processes. The log
    shows progress and failures; **Stop** stops the active stage and preserves
@@ -208,8 +253,7 @@ and **Open report** opens its generated review in your browser. Saving parameter
 is always an explicit action.
 
 This first desktop version launches from Python; it is not yet packaged as a
-standalone installer. The original command-line workflow remains available
-without the Qt dependency.
+standalone installer. The original command-line workflow remains available.
 
 ## Fixed nuclear thresholds
 
@@ -367,10 +411,43 @@ name for a different analysis to avoid mixing it with older outputs.
 - `Methods/`: image metadata, treatment mapping, applied thresholds, methods text,
   data dictionary, workbook input, version records, and validation reports.
 - `Report.md` and `Review.html`: generated summaries and visual review.
+- `Experiment_Summary.png` and `.svg`: a single experiment overview for eLab
+  entries or sharing, saved beside `Review.html`.
+
+The experiment summary is generated in both minimal and detailed QC modes. Each
+selected foci channel has four image-level endpoint panels (mean foci/nucleus,
+mean per-focus area, mean per-focus raw intensity, and focus-positive percentage)
+and three ECDF panels (nucleus foci counts, individual focus areas, and individual
+focus mean raw intensities). Endpoint boxes and faint points use the saved image
+summaries, giving each image one observation per metric, grouped by its full
+combined `treatment_group`. Colors match the detailed graphs.
+
+Exactly two selected foci channels also produce a nucleus scatter: the first
+selected channel is X and the second is Y, with one point per usable nucleus,
+including zero counts, colored by treatment. Channel subsets control the summary
+contents; one or more than two selected channels omit the scatter. No fitted line
+or correlation statistics are added. Missing and nonfinite values are omitted
+per panel, and panels without valid observations display "No measurements".
+
+The PNG is exported at 300 dpi; the SVG keeps text and lines editable, with point
+layers rasterized. Links appear near the top of `Review.html`. Regenerating outputs
+overwrites both summary files without repeating segmentation; `--qc-output off`
+continues to skip figure/report generation.
+
+In `Review.html`, summary graphs appear before image inspection. The final
+"Inspect every image" section groups images by `treatment_group`, with each
+group collapsed by default. Expand a group to see its annotated images and,
+for detailed QC, individual nucleus galleries.
 
 Raw TIFFs remain in their input directory. The saved mapping records their source
 paths; plotting and validation still need those TIFFs to be available there.
 Historical run hashes describe the scripts and parameters at execution time.
+
+Treatment graphs use a 32-color [Glasbey palette](https://colorcet.holoviz.org/user_guide/Categorical.html)
+chosen for white backgrounds. Colors follow the treatment order in the saved
+image mapping and are consistent across boxes, points, distribution curves,
+channels, and input-intensity plots. The first 32 groups each receive a different
+color; colors cycle only for analyses with more than 32 groups.
 
 Shared-contrast QC figures show up to 12 images per page in a four-column grid.
 Every page uses the same display range for that channel across the entire run.
@@ -429,8 +506,10 @@ It writes the workbook and previews inside the chosen analysis folder.
 ## Regression checks
 
 ```sh
-python -m unittest discover -s Scripts/tests -p 'test*.py' -v
+python -m unittest discover -s tests -p 'test*.py' -v
 ```
 
-After copying this folder's contents to your working directory, use `-s tests`.
-Tests create their images and outputs in temporary directories.
+Run this from the project folder. Tests create their images and outputs in
+temporary directories. `.github/workflows/windows.yml` runs installation,
+the launcher, and the regression suite on Windows with Python 3.12, including
+a checkout path containing spaces and Unicode.

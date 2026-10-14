@@ -16,6 +16,53 @@ SCRIPTS = Path(__file__).resolve().parents[1]
 
 
 class PortableLayoutTests(unittest.TestCase):
+    def test_utf8_reports_with_windows_style_default_encoding(self):
+        """Report generation must not depend on the Windows ANSI code page."""
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            # Emulate a non-UTF-8 default for Path text I/O on every test host.
+            # Explicit encoding arguments must still take precedence.
+            (root / 'sitecustomize.py').write_text(
+                'from pathlib import Path\n'
+                'original_open = Path.open\n'
+                'def legacy_open(self, mode="r", buffering=-1, encoding=None, errors=None, newline=None):\n'
+                '    if "b" not in mode and encoding is None:\n'
+                '        encoding = "cp1252"\n'
+                '    return original_open(self, mode, buffering, encoding, errors, newline)\n'
+                'Path.open = legacy_open\n', encoding='utf-8')
+            inputs = root / 'Raw images Δ'
+            inputs.mkdir()
+            yy, xx = np.mgrid[:128, :128]
+            nucleus = 10 + 500 * ((yy - 64)**2 + (xx - 64)**2 < 26**2)
+            arr = np.array([nucleus, np.full((128, 128), 20), np.full((128, 128), 20)], dtype=np.uint16)
+            image = inputs / 'contrôle_Δ.TIF'
+            tifffile.imwrite(image, arr, imagej=True, resolution=(5, 5),
+                             metadata={'unit': 'micron', 'axes': 'CYX'})
+            original_image = image.read_bytes()
+            parameters = json.loads((SCRIPTS / 'parameters.template.json').read_text(encoding='utf-8'))
+            parameters['group_names'] = ['contrôle_Δ']
+            parameters['channels']['2'] = 'γH2AX'
+            config = root / 'parameters Δ.json'
+            config.write_text(json.dumps(parameters, ensure_ascii=False), encoding='utf-8')
+            output = root / 'ORION results Δ'
+            env = dict(os.environ, PYTHONPATH=str(root), PYTHONUTF8='0',
+                       PYTHONIOENCODING='utf-8', MPLCONFIGDIR=str(root / 'cache'))
+            for script, args in [
+                ('analyze_foci.py', ['--input-dir', inputs, '--parameters', config,
+                                     '--output-dir', output, '--foci-channels', '2', '--qc-output', 'minimal']),
+                ('validate_results.py', ['--output-dir', output]),
+            ]:
+                result = subprocess.run([sys.executable, str(SCRIPTS / script), *map(str, args)],
+                                        cwd=root, env=env, capture_output=True, text=True, encoding='utf-8')
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            review = (output / 'Review.html').read_text(encoding='utf-8')
+            self.assertIn('contrôle_Δ', review)
+            self.assertIn('γH2AX', review)
+            methods = (output / 'Methods/Methods.md').read_text(encoding='utf-8')
+            self.assertIn('γH2AX', methods)
+            self.assertTrue((output / 'Methods/Validation_Report.json').is_file())
+            self.assertEqual(image.read_bytes(), original_image)
+
     def test_flat_copy_creates_independent_runs(self):
         with tempfile.TemporaryDirectory() as folder:
             project = Path(folder)
@@ -48,10 +95,10 @@ class PortableLayoutTests(unittest.TestCase):
             self.assertEqual(len(runs), 2)
             for out in runs:
                 self.assertEqual((out / 'Methods/parameters.json').read_bytes(), original_parameters)
-                effective = json.loads((out / 'Methods/Effective_Parameters.json').read_text())
+                effective = json.loads((out / 'Methods/Effective_Parameters.json').read_text(encoding='utf-8'))
                 self.assertEqual(effective['foci_channels'], [2])
                 self.assertTrue((out / 'Results/Cell_Summary.csv').exists())
-                manifest = json.loads((out / 'Methods/Run_Manifest.json').read_text())
+                manifest = json.loads((out / 'Methods/Run_Manifest.json').read_text(encoding='utf-8'))
                 self.assertEqual(manifest['output_directory'], str(out.resolve()))
                 run('validate_results.py', '--output-dir', out)
             self.assertEqual((project / 'experiment.json').read_bytes(), original_parameters)

@@ -19,3 +19,6 @@ Analyses/
 # Node dependencies and generated workbook previews
 node_modules/
 npm-debug.log*
+
+# Portable source bundles
+dist/

@@ -132,6 +132,14 @@ def channel_color(channel):
                      (250, 189, 90), (194, 155, 248))[(channel - 1) % 5], dtype=float)
 
 
+def default_display_colors(channel, nuclear_channel):
+    """Initial signal and outline colors; GUI choices stay with channel numbers."""
+    if channel == nuclear_channel:
+        return (80, 120, 240), (105, 215, 245)
+    color = tuple(int(value) for value in channel_color(channel))
+    return color, color
+
+
 def display_signal(raw):
     """Display-only percentile contrast; never modifies analysis pixel values."""
     low, high = np.percentile(raw, [1, 99.8])
@@ -143,32 +151,42 @@ def display_signal(raw):
 
 
 def render_image(pixels, parameters, preview=None, mode='Overlay', raw_channel=None,
-                 visible_channels=None, outlines=True, selected=0):
-    """Render an RGB display buffer using physical channel numbers throughout."""
+                 visible_channels=None, outlines=True, selected=0,
+                 signal_colors=None, outline_colors=None):
+    """Render display-only pseudocolors, without changing source pixels or masks."""
     n = parameters['nuclear_channel']
     foci = parameters['foci_channels']
     visible = set([n, *foci] if visible_channels is None else visible_channels)
+
+    def color(channel, outline=False):
+        palette = (outline_colors if outline else signal_colors) or {}
+        defaults = default_display_colors(channel, n)
+        return np.asarray(palette.get(channel, defaults[1 if outline else 0]), dtype=float)
+
     canvas = np.zeros((*pixels.shape[1:], 3), dtype=float)
     if mode == 'Raw image':
-        signal = display_signal(pixels[(raw_channel or n) - 1])
-        canvas[:] = signal[..., None] * 255
+        channel = raw_channel or n
+        signal = display_signal(pixels[channel - 1])
+        canvas[:] = signal[..., None] * color(channel)
     elif mode == 'Overlay':
         if n in visible:
-            canvas += display_signal(pixels[n - 1])[..., None] * np.array([80, 120, 240])
+            canvas += display_signal(pixels[n - 1])[..., None] * color(n)
         for channel in foci:
             if channel in visible and channel != n:
-                canvas += display_signal(pixels[channel - 1])[..., None] * channel_color(channel) * .65
+                canvas += display_signal(pixels[channel - 1])[..., None] * color(channel) * .65
     if preview is not None:
-        if mode == 'Nuclei':
-            canvas[preview.nuclei > 0] = [28, 65, 125]
-        if mode in ('Overlay', 'Nuclei') and outlines:
-            canvas[segmentation.find_boundaries(preview.nuclei, mode='inner')] = [105, 215, 245]
+        if mode == 'Nuclei' and n in visible:
+            canvas[preview.nuclei > 0] = color(n) * .45
+        if mode in ('Overlay', 'Nuclei') and outlines and n in visible:
+            canvas[segmentation.find_boundaries(preview.nuclei, mode='inner')] = color(n, outline=True)
         if mode in ('Overlay', 'Foci'):
             for channel, mask in preview.foci_masks.items():
                 if channel in visible:
-                    mark = mask > 0 if mode == 'Foci' else segmentation.find_boundaries(mask, mode='inner')
-                    canvas[mark] = channel_color(channel)
-        if selected:
+                    if mode == 'Foci':
+                        canvas[mask > 0] = color(channel)
+                    if outlines:
+                        canvas[segmentation.find_boundaries(mask, mode='inner')] = color(channel, outline=True)
+        if selected and mode != 'Raw image':
             canvas[segmentation.find_boundaries(preview.candidates == selected, mode='inner')] = [255, 219, 100]
     return np.ascontiguousarray(np.clip(canvas, 0, 255).astype(np.uint8))
 

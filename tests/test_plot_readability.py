@@ -182,7 +182,7 @@ class InputIntensityTests(unittest.TestCase):
             outputs.make_input_intensity_plots(self.qdir,mapping,self.params)
         self.assertFalse(caught,[str(w.message) for w in caught])
         self.assertTrue((self.qdir/'C1_Input_Intensity_Group_001.png').exists())
-        self.assertIn('Mean intensity: 0 ADU', (self.qdir/'C1_Input_Intensity_Group_001.svg').read_text())
+        self.assertIn('Mean intensity: 0 ADU', (self.qdir/'C1_Input_Intensity_Group_001.svg').read_text(encoding='utf-8'))
 
 
 if __name__=='__main__':

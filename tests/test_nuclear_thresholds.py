@@ -16,7 +16,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from analyze_foci import nuclear_segmentation, validate_nuclear_threshold_range
 
 SCRIPTS=Path(__file__).resolve().parents[1]
-PARAMETERS=json.loads((SCRIPTS/'parameters.template.json').read_text())
+PARAMETERS=json.loads((SCRIPTS/'parameters.template.json').read_text(encoding='utf-8'))
 
 
 class NuclearThresholdTests(unittest.TestCase):
@@ -101,10 +101,10 @@ class NuclearThresholdTests(unittest.TestCase):
                 self.assertTrue(table.nuclear_threshold_adu.eq(131).all())
                 self.assertTrue(table.nuclear_threshold_upper_adu.eq(255).all())
             self.assertEqual(cells.nuclear_stain_mean_adu.iloc[0],210)
-            saved=json.loads((out/'Methods/Effective_Parameters.json').read_text())
+            saved=json.loads((out/'Methods/Effective_Parameters.json').read_text(encoding='utf-8'))
             self.assertEqual(saved['nuclear']['fixed_threshold_adu'],[131,255])
             self.assertEqual(saved['foci'],p['foci'])
-            methods=(out/'Methods/Methods.md').read_text()
+            methods=(out/'Methods/Methods.md').read_text(encoding='utf-8')
             self.assertIn('fixed inclusive range 131–255 ADU',methods)
             self.assertIn('Gaussian intensity smoothing and background subtraction are not used for foreground selection',methods)
             self.assertNotIn('foreground threshold is the full-image smoothed',methods)

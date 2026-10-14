@@ -61,7 +61,7 @@ class CompressedTIFFTests(unittest.TestCase):
                 signal += 180 * np.exp(-((yy - y) ** 2 + (xx - x) ** 2) / 8)
             stack = np.array([nuclear, signal, signal * .6], dtype=np.uint8)
             rgb = np.moveaxis(stack[[2, 1, 0]], 0, 2)
-            parameters = copy.deepcopy(json.loads((ROOT / 'parameters.template.json').read_text()))
+            parameters = copy.deepcopy(json.loads((ROOT / 'parameters.template.json').read_text(encoding='utf-8')))
             parameters.update(rgb_channel_order=['blue', 'green', 'red'], qc_output='off')
             config = root / 'parameters.json'
             config.write_text(json.dumps(parameters))
@@ -96,9 +96,9 @@ class CompressedTIFFTests(unittest.TestCase):
             for channel in parameters['foci_channels']:
                 np.testing.assert_array_equal(tifffile.imread(output / f'Masks/I01_C{channel}_foci.tif'),
                                               baseline.foci_masks[channel])
-            manifest = json.loads((output / 'Methods/Run_Manifest.json').read_text())
+            manifest = json.loads((output / 'Methods/Run_Manifest.json').read_text(encoding='utf-8'))
             self.assertEqual(manifest['imagecodecs'], version('imagecodecs'))
-            requirements = (output / 'Methods/requirements.txt').read_text().splitlines()
+            requirements = (output / 'Methods/requirements.txt').read_text(encoding='utf-8').splitlines()
             self.assertIn(f'imagecodecs=={version("imagecodecs")}', requirements)
             self.assertEqual(compressed.read_bytes(), before)
 

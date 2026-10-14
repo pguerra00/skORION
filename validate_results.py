@@ -84,7 +84,7 @@ def main():
             'nuclear_channel':nuclear_channel,'foci_channels':foci_channels,
             'rgb_channel_order':p.get('rgb_channel_order'),
             'validation_scope':'Independent pixel/mask/table reconciliation for the selected channels; not validation against human focus ground truth.'}
-    (out/'Methods'/'Validation_Report.json').write_text(json.dumps(report,indent=2))
+    (out/'Methods'/'Validation_Report.json').write_text(json.dumps(report,indent=2), encoding='utf-8')
     print(json.dumps({'status':'passed','counts':counts,'checks_passed':len(checks)},indent=2))
 
 

@@ -20,7 +20,7 @@ from channel_config import resolve_channels
 import make_outputs as outputs
 
 METHODS = Path(__file__).resolve().parents[1]
-PARAMETERS = json.loads((METHODS / 'parameters.template.json').read_text())
+PARAMETERS = json.loads((METHODS / 'parameters.template.json').read_text(encoding='utf-8'))
 
 
 def svg_text(path):
@@ -78,15 +78,19 @@ class DownstreamChannelTests(unittest.TestCase):
         self.assertFalse((out/'QC/Native_Overlays').exists())
         self.assertFalse((out/'QC/Nucleus_Crops').exists())
         for name in ['QC/I01_Annotated_QC.png','QC/I02_Annotated_QC.png','QC/C1_Shared_Contrast.png',
-                     'Plots/Channel_1/Image_Level_Endpoints.svg','Methods/workbook_data.json','Report.md']:
+                     'Plots/Channel_1/Image_Level_Endpoints.svg','Methods/workbook_data.json','Report.md',
+                     'Experiment_Summary.png','Experiment_Summary.svg']:
             self.assertTrue((out/name).exists(),name)
-        review=(out/'Review.html').read_text()
+        review=(out/'Review.html').read_text(encoding='utf-8')
         self.assertNotIn('Native_Overlays',review)
         self.assertNotIn('Nucleus_Crops',review)
         self.assertIn('2 images · 2 groups · 2 usable nuclei',review)
         self.assertIn('Comparisons use combined treatment groups',review)
+        self.assertIn('href="Experiment_Summary.png"',review)
+        self.assertIn('href="Experiment_Summary.svg"',review)
+        self.assertLess(review.index('href="Experiment_Summary.png"'),review.index('<h2>QC findings'))
         self.assertNotIn('Groups can overlap',review)
-        methods=(out/'Methods/Methods.md').read_text()
+        methods=(out/'Methods/Methods.md').read_text(encoding='utf-8')
         self.assertIn('Minimal QC was requested',methods)
         self.assertNotIn('Nucleus_Crops contains',methods)
         for index,name in enumerate(['field_siControl_100MMC.tif','field_siControl_20PDS.tif'],1):
@@ -137,21 +141,23 @@ class DownstreamChannelTests(unittest.TestCase):
         self.assertIn('Each image receives equal weight in both averages',methods)
         self.assertIn('comparison uses treatment_group',methods)
         self.assertNotIn('Overlapping groups',methods)
-        self.assertIn('Comparisons use combined treatment_group labels',(out/'Report.md').read_text())
-        self.assertEqual(json.loads((out/'Methods/Output_Parameters.json').read_text())['qc_output'],'minimal')
+        self.assertIn('Comparisons use combined treatment_group labels',(out/'Report.md').read_text(encoding='utf-8'))
+        self.assertEqual(json.loads((out/'Methods/Output_Parameters.json').read_text(encoding='utf-8'))['qc_output'],'minimal')
         self.run_script('validate_results.py','--output-dir',out)
 
     def test_automatic_detailed_qc(self):
         out=self.fixture(channels=(1,),qc_output='detailed',filenames=('synthetic.TIF',))
+        self.assertTrue((out/'Experiment_Summary.png').exists())
+        self.assertTrue((out/'Experiment_Summary.svg').exists())
         self.assertTrue((out/'QC/Native_Overlays/I01_C1_foci_outlines.png').exists())
         self.assertTrue((out/'QC/Native_Overlays/I01_C3_nuclear_outlines.png').exists())
         self.assertTrue((out/'QC/Nucleus_Crops/I01_N001.png').exists())
-        self.assertIn('QC/Nucleus_Crops/I01_N001.png',(out/'Review.html').read_text())
-        self.assertEqual(json.loads((out/'Methods/Run_Manifest.json').read_text())['qc_output'],'detailed')
+        self.assertIn('QC/Nucleus_Crops/I01_N001.png',(out/'Review.html').read_text(encoding='utf-8'))
+        self.assertEqual(json.loads((out/'Methods/Run_Manifest.json').read_text(encoding='utf-8'))['qc_output'],'detailed')
         # Switching to minimal hides previous detailed files without deleting them.
         self.run_script('make_outputs.py','--output-dir',out,'--qc-output','minimal')
-        self.assertNotIn('Native_Overlays',(out/'Review.html').read_text())
-        self.assertNotIn('Nucleus_Crops',(out/'Review.html').read_text())
+        self.assertNotIn('Native_Overlays',(out/'Review.html').read_text(encoding='utf-8'))
+        self.assertNotIn('Nucleus_Crops',(out/'Review.html').read_text(encoding='utf-8'))
         self.assertTrue((out/'QC/Nucleus_Crops/I01_N001.png').exists())
 
     def test_legacy_tables_without_group_names(self):
@@ -166,10 +172,10 @@ class DownstreamChannelTests(unittest.TestCase):
         old_histogram.write_text('Previous combined histogram')
         self.run_script('make_outputs.py','--output-dir',out,'--qc-output','minimal')
         self.assertIn('20PDS',svg_text(out/'Plots/Channel_1/Focus_Positive_Nuclei.svg'))
-        self.assertIn('1 images · 1 groups · 1 usable nuclei',(out/'Review.html').read_text())
+        self.assertIn('1 images · 1 groups · 1 usable nuclei',(out/'Review.html').read_text(encoding='utf-8'))
         for path,content in before.items():self.assertEqual(path.read_bytes(),content)
-        self.assertEqual(old_histogram.read_text(),'Previous combined histogram')
-        self.assertNotIn(old_histogram.name,(out/'Review.html').read_text())
+        self.assertEqual(old_histogram.read_text(encoding='utf-8'),'Previous combined histogram')
+        self.assertNotIn(old_histogram.name,(out/'Review.html').read_text(encoding='utf-8'))
         self.run_script('validate_results.py','--output-dir',out)
 
     def test_small_scatter_markers_and_rotated_treatment_labels(self):
@@ -234,7 +240,7 @@ class DownstreamChannelTests(unittest.TestCase):
                          group_names=['siControl','100MMC'],
                          filenames=('field_siControl.tif','field_siControl_100MMC.tif','unmatched.tif'))
         groups=['siControl','siControl + 100MMC','AMBIGUOUS']
-        self.assertIn('3 images · 3 groups · 0 usable nuclei',(out/'Review.html').read_text())
+        self.assertIn('3 images · 3 groups · 0 usable nuclei',(out/'Review.html').read_text(encoding='utf-8'))
         self.assertTrue(pd.read_csv(out/'Results/Cell_Summary.csv').empty)
         self.assertTrue(pd.read_csv(out/'Results/Focus_Data.csv').empty)
         labels=svg_text(out/'Plots/Channel_1/Image_Level_Endpoints.svg')
@@ -246,13 +252,13 @@ class DownstreamChannelTests(unittest.TestCase):
     def test_saved_selection_and_explicit_subset(self):
         out = self.fixture()
         self.run_script('validate_results.py', '--output-dir', out)
-        report = json.loads((out / 'Methods/Validation_Report.json').read_text())
+        report = json.loads((out / 'Methods/Validation_Report.json').read_text(encoding='utf-8'))
         self.assertEqual(report['nuclear_channel'], 3)
         self.assertEqual(report['foci_channels'], [1, 4])
         self.assertEqual(report['counts']['channel_4_foci'], 0)
         self.assertGreater(report['counts']['channel_1_foci'], 0)
         self.run_script('make_outputs.py', '--output-dir', out)
-        text = (out / 'Review.html').read_text()
+        text = (out / 'Review.html').read_text(encoding='utf-8')
         self.assertIn('C3 (Nuclear stain)', text)
         self.assertIn('Channel 1 · Focus A', text)
         self.assertIn('Channel 4 · Focus B', text)
@@ -261,13 +267,13 @@ class DownstreamChannelTests(unittest.TestCase):
         self.assertTrue((out / 'Plots/Channel_4/Focus_Properties.svg').exists())
         ranges = pd.read_csv(out / 'QC/QC_Display_Ranges.csv')
         self.assertEqual(set(ranges.channel), {1, 3, 4})
-        methods = (out / 'Methods/Methods.md').read_text()
+        methods = (out / 'Methods/Methods.md').read_text(encoding='utf-8')
         self.assertIn('Nuclear segmentation uses C3 (Nuclear stain)', methods)
         self.assertNotIn('C2 floors', methods)
         self.run_script('make_outputs.py', '--output-dir', out, '--nuclear-channel', 3, '--foci-channels', 1)
         self.run_script('validate_results.py', '--output-dir', out, '--nuclear-channel', 3, '--foci-channels', 1)
-        self.assertNotIn('Channel_4', (out / 'Review.html').read_text())
-        self.assertEqual(json.loads((out / 'Methods/Validation_Report.json').read_text())['foci_channels'], [1])
+        self.assertNotIn('Channel_4', (out / 'Review.html').read_text(encoding='utf-8'))
+        self.assertEqual(json.loads((out / 'Methods/Validation_Report.json').read_text(encoding='utf-8'))['foci_channels'], [1])
         for script in ['make_outputs.py', 'validate_results.py']:
             result = self.run_script(script, '--output-dir', out, '--nuclear-channel', 2, success=False)
             self.assertIn('Saved nuclear masks use channel 3', result.stderr)
@@ -281,7 +287,7 @@ class DownstreamChannelTests(unittest.TestCase):
         native = out / 'QC/Native_Overlays'
         self.assertTrue((native / 'I01_C3_nuclear_outlines.png').exists())
         self.assertTrue((native / 'I01_C3_foci_outlines.png').exists())
-        self.assertEqual(json.loads((out / 'Methods/Validation_Report.json').read_text())['counts']['nuclei'], 0)
+        self.assertEqual(json.loads((out / 'Methods/Validation_Report.json').read_text(encoding='utf-8'))['counts']['nuclei'], 0)
 
     def test_configuration_precedence_and_legacy(self):
         folder = self.root / 'Methods'

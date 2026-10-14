@@ -16,7 +16,7 @@ from analyze_foci import detect_nucleus,select_channels
 from gui_analysis import analyze_preview,validate_parameters
 
 ROOT=Path(__file__).resolve().parents[1]
-PARAMETERS=json.loads((ROOT/'parameters.template.json').read_text())
+PARAMETERS=json.loads((ROOT/'parameters.template.json').read_text(encoding='utf-8'))
 
 
 class AdaptiveSplittingTests(unittest.TestCase):
@@ -150,7 +150,7 @@ class AdaptiveSplittingTests(unittest.TestCase):
             self.assertEqual(applied.adaptive_split_suppressed_seeds.tolist(),
                              [preview.thresholds[0]['adaptive_split_suppressed_seeds']])
             self.assertEqual(path.read_bytes(),before)
-            methods=(root/'out/Methods/Methods.md').read_text()
+            methods=(root/'out/Methods/Methods.md').read_text(encoding='utf-8')
             self.assertIn('Adaptive splitting is enabled for C3: fraction 0.3',methods)
             self.assertIn('minimum corrected peak 100 ADU',methods)
             self.assertIn('merged-basin trimming at 15%',methods)

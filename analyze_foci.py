@@ -435,7 +435,7 @@ def main():
         (out/sub).mkdir(parents=True,exist_ok=True)
     # Preserve the exact source settings and the settings with CLI overrides.
     (out/'Methods'/'parameters.json').write_bytes(parameter_bytes)
-    (out/'Methods'/'Effective_Parameters.json').write_text(json.dumps(p,indent=2))
+    (out/'Methods'/'Effective_Parameters.json').write_text(json.dumps(p,indent=2), encoding='utf-8')
     print(f'Analysis output: {out}',flush=True)
     # print(f'Analysis: 0/{len(files)} images processed; {len(files)} remaining',flush=True)
     mapping=[];cells=[];foci=[];nucaudit=[];focaudit=[];qc=[];intensity=[];sensitivity=[];metadata={};thresholds=[]
@@ -623,7 +623,7 @@ def main():
     pd.DataFrame(focaudit).to_csv(out/'QC'/'Focus_Candidate_Audit.csv',index=False,float_format='%.10g')
     pd.DataFrame(sensitivity).to_csv(out/'QC'/'Threshold_Sensitivity.csv',index=False)
     pd.DataFrame(thresholds).to_csv(out/'Methods'/'Applied_Thresholds.csv',index=False,float_format='%.10g')
-    (out/'Methods'/'Image_Metadata.json').write_text(json.dumps(json_clean(metadata),indent=2))
+    (out/'Methods'/'Image_Metadata.json').write_text(json.dumps(json_clean(metadata),indent=2), encoding='utf-8')
     try:
         codec_version=version('imagecodecs')
     except PackageNotFoundError:
@@ -641,8 +641,8 @@ def main():
          'output_directory':str(out),'input_directory':str(args.input_dir.resolve()),
          'parameters_source':str(args.parameters.resolve()),'pipeline_source':str(Path(__file__).resolve()),
          'pipeline_sha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
-    (out/'Methods'/'Run_Manifest.json').write_text(json.dumps(run,indent=2))
-    (out/'Methods'/'Effective_Parameters.json').write_text(json.dumps(p,indent=2))
+    (out/'Methods'/'Run_Manifest.json').write_text(json.dumps(run,indent=2), encoding='utf-8')
+    (out/'Methods'/'Effective_Parameters.json').write_text(json.dumps(p,indent=2), encoding='utf-8')
     print(json.dumps(run,indent=2),flush=True)
     print(f'Analysis complete: {len(files)}/{len(files)} images processed; 0 remaining',flush=True)
     if args.qc_output!='off':

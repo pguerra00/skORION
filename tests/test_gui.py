@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -24,9 +25,10 @@ QT_AVAILABLE = importlib.util.find_spec('PySide6') is not None
 if QT_AVAILABLE:
     os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
     from PySide6.QtWidgets import QApplication
+    from PySide6.QtGui import QColor
     from orion_gui import OrionWindow
 
-PARAMETERS = json.loads((ROOT / 'parameters.template.json').read_text())
+PARAMETERS = json.loads((ROOT / 'parameters.template.json').read_text(encoding='utf-8'))
 
 
 def fixture(directory, nuclear=3):
@@ -51,6 +53,40 @@ def fixture(directory, nuclear=3):
 
 
 class PreviewTests(unittest.TestCase):
+    def test_pseudocolors_outlines_and_visibility_do_not_modify_analysis_data(self):
+        pixels = np.tile(np.arange(9, dtype=np.uint16), (3, 9, 1))
+        nuclei = np.zeros((9, 9), dtype=np.int32)
+        nuclei[1:8, 1:8] = 1
+        foci = np.zeros_like(nuclei)
+        foci[3:6, 3:6] = 1
+        preview = SimpleNamespace(nuclei=nuclei, candidates=nuclei, foci_masks={1: foci})
+        original = [array.copy() for array in (pixels, nuclei, foci)]
+        p = {'nuclear_channel': 3, 'foci_channels': [1]}
+        options = {'signal_colors': {1: (255, 0, 0), 3: (0, 0, 200)},
+                   'outline_colors': {1: (0, 255, 0), 3: (255, 255, 0)}}
+        raw = render_image(pixels, p, preview, mode='Raw image', raw_channel=1, selected=1, **options)
+        self.assertEqual(raw[4, 8].tolist(), [255, 0, 0])
+        np.testing.assert_array_equal(raw, render_image(pixels, p, mode='Raw image', raw_channel=1, **options))
+        nuclear = render_image(pixels, p, preview, mode='Nuclei', **options)
+        self.assertEqual(nuclear[2, 2].tolist(), [0, 0, 90])
+        self.assertEqual(nuclear[1, 2].tolist(), [255, 255, 0])
+        hidden = render_image(pixels, p, preview, mode='Nuclei', visible_channels=[1], **options)
+        self.assertFalse(hidden.any())
+        focus = render_image(pixels, p, preview, mode='Foci', **options)
+        self.assertEqual(focus[4, 4].tolist(), [255, 0, 0])
+        self.assertEqual(focus[3, 4].tolist(), [0, 255, 0])
+        no_outline = render_image(pixels, p, preview, mode='Foci', outlines=False, **options)
+        self.assertEqual(no_outline[3, 4].tolist(), [255, 0, 0])
+        overlay = render_image(pixels, p, preview, **options)
+        self.assertEqual(overlay[1, 2].tolist(), [255, 255, 0])
+        self.assertEqual(overlay[3, 4].tolist(), [0, 255, 0])
+        hidden = render_image(pixels, p, preview, visible_channels=[], **options)
+        self.assertFalse(hidden.any())
+        no_outline = render_image(pixels, p, preview, outlines=False, **options)
+        self.assertEqual(no_outline[3, 4, 1], 0)
+        for before, after in zip(original, (pixels, nuclei, foci)):
+            np.testing.assert_array_equal(before, after)
+
     def test_fill_holes_setting_changes_the_mask(self):
         yy, xx = np.mgrid[:64, :64]
         radius = (yy - 32) ** 2 + (xx - 32) ** 2
@@ -159,10 +195,62 @@ class DesktopTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             window.collect_parameters()
 
-    def test_background_preview_and_complete_analysis_with_channel_three_nuclei(self):
+    def test_view_tabs_color_dialog_and_saved_display_preferences(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            _, path, p = fixture(root, nuclear=3)
+            preview = analyze_preview(path, p)
+            window = self.make_window()
+            window.parameters = p
+            window.load_controls()
+            window.preview_complete(preview)
+            pixels, nuclei = preview.pixels.copy(), preview.nuclei.copy()
+            self.assertEqual([window.view_tabs.tabText(i) for i in range(window.view_tabs.count())],
+                             ['Raw image', 'Nuclei', 'Foci', 'Overlay'])
+            window.colors_toggle.setChecked(True)
+            self.assertFalse(window.colors_panel.isHidden())
+            with patch('orion_gui.QColorDialog.getColor', return_value=QColor('#ff0000')):
+                window.color_buttons[1, 'signal'].click()
+            with patch('orion_gui.QColorDialog.getColor', return_value=QColor('#00ff00')):
+                window.color_buttons[1, 'outline'].click()
+            self.assertIs(window.preview, preview)
+            self.assertEqual(window.color_buttons[1, 'signal'].text(), '#FF0000')
+            self.assertEqual(window.color_buttons[1, 'outline'].text(), '#00FF00')
+            with patch('orion_gui.QColorDialog.getColor', return_value=QColor()):
+                window.color_buttons[1, 'signal'].click()
+            self.assertEqual(window.signal_colors[1], '#ff0000')
+            window.viewer.scale(2, 2)
+            zoom = window.viewer.transform().m11()
+            for index in range(4):
+                window.view_tabs.setCurrentIndex(index)
+                self.assertEqual(window.raw_channel.isEnabled(), index == 0)
+                self.assertEqual(window.viewer.transform().m11(), zoom)
+                self.assertIs(window.preview, preview)
+            np.testing.assert_array_equal(preview.pixels, pixels)
+            np.testing.assert_array_equal(preview.nuclei, nuclei)
+            config = root / 'colors.json'
+            with patch('orion_gui.QFileDialog.getSaveFileName', return_value=(str(config), 'JSON files (*.json)')):
+                window.save_parameters()
+            saved = json.loads(config.read_text())
+            self.assertEqual(saved['gui_display']['channels']['1'], {'signal': '#ff0000', 'outline': '#00ff00'})
+            window.reset_display_colors()
+            self.assertNotEqual(window.signal_colors[1], '#ff0000')
+            window.load_parameters()
+            self.assertEqual(window.signal_colors[1], '#ff0000')
+            self.assertEqual(window.outline_colors[1], '#00ff00')
+            self.assertNotIn(('gui_display', 'channels', '1', 'signal'), window.advanced.editors)
+            window.nuclear.setCurrentIndex(0)
+            window.foci_checks[1].setChecked(False)
+            self.assertEqual(window.signal_colors[1], '#ff0000')
+            self.assertEqual(window.outline_colors[1], '#00ff00')
+            self.assertEqual(window.test_errors, [])
+
+    def test_background_preview_and_complete_analysis_with_channel_three_nuclei(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / 'Experiment Δ with spaces'
+            root.mkdir()
             inputs, path, p = fixture(root)
+            path = path.rename(inputs / 'Control_Δ.TIF')
             config = root / 'config.json'
             config.write_text(json.dumps(p))
             window = self.make_window()
@@ -196,15 +284,16 @@ class DesktopTests(unittest.TestCase):
             self.assertEqual(window.table_origin, 'saved')
             self.assertTrue((root / 'output/Methods/Validation_Report.json').is_file())
             self.assertTrue((root / 'output/Review.html').is_file())
-            output_settings = json.loads((root / 'output/Methods/Output_Parameters.json').read_text())
+            self.assertIn('Control_Δ.TIF', window.log.toPlainText())
+            output_settings = json.loads((root / 'output/Methods/Output_Parameters.json').read_text(encoding='utf-8'))
             self.assertEqual(output_settings['qc_output'], 'minimal')
-            methods = (root / 'output/Methods/Methods.md').read_text()
+            methods = (root / 'output/Methods/Methods.md').read_text(encoding='utf-8')
             for description in ['internal holes are retained', '25 to 275 square microns',
                                 'Gaussian sigma 1.25 px', '4 x sigma_smooth',
                                 '30% of its corrected peak', 'At least 10 annular pixels',
                                 'after 11 px dilation']:
                 self.assertIn(description, methods)
-            effective = json.loads((root / 'output/Methods/Effective_Parameters.json').read_text())
+            effective = json.loads((root / 'output/Methods/Effective_Parameters.json').read_text(encoding='utf-8'))
             self.assertEqual(effective['nuclear_channel'], 3)
             self.assertEqual(effective['foci_channels'], [1, 2])
             self.assertEqual((config.read_bytes(), path.read_bytes()), before)
@@ -285,7 +374,7 @@ class DesktopTests(unittest.TestCase):
                 np.testing.assert_array_equal(window.preview.foci_masks[channel], baseline.foci_masks[channel])
             window.start_analysis()
             self.wait_until_idle(window)
-            effective = json.loads((root / 'output/Methods/Effective_Parameters.json').read_text())
+            effective = json.loads((root / 'output/Methods/Effective_Parameters.json').read_text(encoding='utf-8'))
             self.assertEqual(effective['rgb_channel_order'], ['green', 'blue', 'red'])
             self.assertEqual(effective['nuclear_channel'], 2)
             np.testing.assert_array_equal(tifffile.imread(root / 'output/Masks/I01_nuclei.tif'), baseline.nuclei)
@@ -357,7 +446,7 @@ class DesktopTests(unittest.TestCase):
             destination = root / 'experiment.json'
             with patch('orion_gui.QFileDialog.getSaveFileName', return_value=(str(destination), 'JSON files (*.json)')):
                 window.save_parameters()
-            saved = json.loads(destination.read_text())
+            saved = json.loads(destination.read_text(encoding='utf-8'))
             self.assertEqual(saved['group_names'], ['Control', 'Treatment'])
             self.assertEqual(window.parameter_name.text(), 'experiment.json')
             forbidden = inputs / 'config.json'

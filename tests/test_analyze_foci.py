@@ -20,7 +20,7 @@ from analyze_foci import select_channels, validate_group_names, metadata_row
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / 'analyze_foci.py'
-PARAMETERS = json.loads(SCRIPT.with_name('parameters.template.json').read_text())
+PARAMETERS = json.loads(SCRIPT.with_name('parameters.template.json').read_text(encoding='utf-8'))
 
 
 class ChannelSelectionTests(unittest.TestCase):
@@ -187,10 +187,10 @@ class ChannelSelectionTests(unittest.TestCase):
             self.assertFalse(any(c.startswith(('C2_', 'C3_')) for c in cells))
             self.assertEqual(set(pd.read_csv(swapped / 'Results/Focus_Data.csv').channel), {1})
             self.assertFalse((swapped / 'Masks/I01_C2_foci.tif').exists())
-            manifest = json.loads((swapped / 'Methods/Run_Manifest.json').read_text())
+            manifest = json.loads((swapped / 'Methods/Run_Manifest.json').read_text(encoding='utf-8'))
             self.assertEqual(manifest['foci_channels'], [1])
             self.assertEqual(manifest['nuclear_channel'], 3)
-            effective = json.loads((swapped / 'Methods/Effective_Parameters.json').read_text())
+            effective = json.loads((swapped / 'Methods/Effective_Parameters.json').read_text(encoding='utf-8'))
             self.assertEqual(effective['foci_channels'], [1])
 
             # More than three planes, configured through JSON instead of CLI.

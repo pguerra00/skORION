@@ -19,7 +19,15 @@ from image_io import read_channels
 
 GROUPS=['20PDS','100MMC','ART558_20PDS']
 LABELS=['20PDS','100MMC','ART558 + 20PDS']
-COLORS=['#0072B2','#D55E00','#009E73']
+# First 32 colors of Colorcet's glasbey_dark, for plots on white backgrounds.
+# https://colorcet.holoviz.org/user_guide/Categorical.html
+TREATMENT_PALETTE=(
+    '#d60000','#8c3bff','#018700','#00acc6','#e6a500','#ff7ed1','#6b004f','#573b00',
+    '#005659','#15e18c','#0000dd','#a17569','#bcb6ff','#bf03b8','#645472','#790000',
+    '#0774d8','#729a7c','#ff7752','#004b00','#8e7b01','#f2007b','#8eba00','#a57bb8',
+    '#5901a3','#e2afaf','#a03a52','#a1c8c8','#9e4b00','#546744','#bac389','#5e7b87',
+)
+COLORS=list(TREATMENT_PALETTE)
 STYLE={'font.family':'DejaVu Sans','font.size':10,'axes.titlesize':11,'axes.labelsize':10,
        'axes.spines.top':False,'axes.spines.right':False,'svg.fonttype':'none','savefig.facecolor':'white'}
 plt.rcParams.update(STYLE)
@@ -202,6 +210,91 @@ def stripbox(ax,df,col,ylabel,rng,log=False,point_alpha=None):
     numeric=pd.to_numeric(df[col],errors='coerce')
     if log and (np.isfinite(numeric)&(numeric>0)).any():ax.set_yscale('log')
     elif ax.get_ylim()[0]>0:ax.set_ylim(bottom=0)
+
+
+def make_experiment_summary(out,mapping,image,cell,focus,p):
+    """One overview from saved measurements; each image/nucleus is used once."""
+    print('Rendering experiment summary...',flush=True)
+    channels=p['foci_channels'];paired=len(channels)==2
+    rng=np.random.default_rng(p['random_seed_for_plot_jitter'])
+    legend_labels=[textwrap.fill(str(label),40) for label in LABELS]
+    legend_lines=max((label.count('\n')+1 for label in legend_labels),default=1)
+    header_height=1.2+.3*math.ceil(len(GROUPS)/4)*legend_lines
+    heights=[header_height]+[8]*len(channels)+([5] if paired else [])
+    fig=plt.figure(figsize=(18,sum(heights)+.8),layout='constrained')
+    try:
+        blocks=np.atleast_1d(fig.subfigures(len(heights),1,height_ratios=heights))
+        header=blocks[0].subplots();header.axis('off')
+        header.text(.5,1,textwrap.fill(out.name,90),ha='center',va='top',fontsize=18,weight='bold',transform=header.transAxes)
+        header.text(.5,1-.55/header_height,
+                    f'{len(image)} images · {len(cell):,} usable nuclei · {len(GROUPS)} treatment groups',
+                    ha='center',va='top',fontsize=11,transform=header.transAxes)
+        handles=[Line2D([],[],color=COLORS[j],marker='o',linestyle='none',
+                        label=legend_labels[j]) for j in range(len(GROUPS))]
+        if handles:header.legend(handles=handles,loc='lower center',ncols=min(4,len(handles)),frameon=False,fontsize=9)
+        rgb='input_format' in mapping and mapping.input_format.eq('rgb_export').any()
+        intensity_unit='stored units' if rgb else 'ADU'
+        for block,c in zip(blocks[1:],channels):
+            block.suptitle(f'Channel {c} · {marker_name(p,c)}',fontsize=15,weight='bold')
+            grid=block.add_gridspec(2,1)
+            endpoint_grid=grid[0].subgridspec(1,4)
+            specs=[('mean_foci_per_nucleus','Mean foci/nucleus','Foci per nucleus'),
+                   ('mean_focus_area_um2','Mean focus area','Focus area (μm²)'),
+                   ('mean_focus_intensity_adu','Mean focus intensity',f'Raw intensity ({intensity_unit})'),
+                   ('percent_focus_positive_nuclei','Focus-positive nuclei','Focus-positive nuclei (%)')]
+            for j,(key,title,label) in enumerate(specs):
+                ax=block.add_subplot(endpoint_grid[0,j]);col=f'C{c}_{key}'
+                stripbox(ax,image,col,label,rng,point_alpha=.25)
+                ax.set_title(title);ax.set_xlim(-.5,len(GROUPS)-.5)
+                # Wrapping keeps long combined treatment names within the panels.
+                ax.set_xticklabels([textwrap.fill(str(label),24) for label in LABELS],
+                                   rotation=45,ha='right',rotation_mode='anchor',fontsize=8)
+                values=pd.to_numeric(image[col],errors='coerce').to_numpy(float)
+                values=values[np.isfinite(values)]
+                if key=='percent_focus_positive_nuclei':ax.set_ylim(0,110)
+                else:ax.set_ylim(bottom=min(0,float(values.min())*1.1) if len(values) else 0,
+                                 top=max(float(values.max())*1.22,.01) if len(values) else 1)
+                if not len(values):ax.text(.5,.5,'No measurements',transform=ax.transAxes,ha='center',va='center')
+            ecdf_grid=grid[1].subgridspec(1,3)
+            ff=focus[focus.channel==c]
+            for j,(df,key,label,log) in enumerate([
+                    (cell,f'C{c}_foci_count','Foci per nucleus',False),
+                    (ff,'focus_area_um2','Focus area (μm²)',True),
+                    (ff,'raw_mean_adu',f'Mean focus intensity ({intensity_unit})',True)]):
+                ax=block.add_subplot(ecdf_grid[0,j]);any_values=False;any_positive=False
+                for k,g in enumerate(GROUPS):
+                    values=pd.to_numeric(df.loc[df.treatment_group==g,key],errors='coerce').to_numpy(float)
+                    values=np.sort(values[np.isfinite(values)])
+                    if not len(values):continue
+                    any_values=True;any_positive|=bool((values>0).any())
+                    ax.step(values,np.arange(1,len(values)+1)/len(values),where='post',color=COLORS[k],
+                            label=f'{textwrap.fill(str(LABELS[k]),32)} (n={len(values):,})',lw=1.8)
+                ax.set_title('Distribution ECDF');ax.set_xlabel(label)
+                ax.set_ylabel('Cumulative proportion');ax.set_ylim(0,1.02);ax.grid(alpha=.15)
+                if any_values:ax.legend(fontsize=8,loc='lower right')
+                else:ax.text(.5,.5,'No measurements',transform=ax.transAxes,ha='center',va='center')
+                if log and any_positive:ax.set_xscale('log')
+        if paired:
+            ax=blocks[-1].subplots();first,second=channels;valid_count=0
+            for j,g in enumerate(GROUPS):
+                rows=cell[cell.treatment_group==g]
+                x=pd.to_numeric(rows[f'C{first}_foci_count'],errors='coerce').to_numpy(float)
+                y=pd.to_numeric(rows[f'C{second}_foci_count'],errors='coerce').to_numpy(float)
+                valid=np.isfinite(x)&np.isfinite(y);valid_count+=int(valid.sum())
+                if valid.any():ax.scatter(x[valid],y[valid],s=SCATTER_SIZE,alpha=.3,
+                                          color=COLORS[j],edgecolors='none',rasterized=True)
+            ax.set_title('Foci counts across channels · one point per nucleus',fontsize=14)
+            ax.set_xlabel(f'C{first} {marker_name(p,first)} · foci per nucleus')
+            ax.set_ylabel(f'C{second} {marker_name(p,second)} · foci per nucleus')
+            ax.set_xlim(left=0);ax.set_ylim(bottom=0);ax.grid(alpha=.15)
+            if not valid_count:ax.text(.5,.5,'No measurements',transform=ax.transAxes,ha='center',va='center')
+        caption=('Endpoint boxes: image-level median and IQR; whiskers: within 1.5 × IQR. Faint endpoint points: individual images.\n'
+                 'ECDF counts use individual nuclei; area and intensity ECDFs use individual foci. Nuclei and foci are nested within images; descriptive comparisons only.')
+        if rgb:caption+='\nRGB intensities are stored color-component values, not recovered detector ADU.'
+        fig.supxlabel(caption,fontsize=9)
+        figsave(fig,out,'Experiment_Summary')
+    finally:
+        plt.close(fig)
 
 
 def make_plots(out,cell,focus,image,p):
@@ -432,13 +525,13 @@ def build_methods(out,p,mapping,images,cell,focus,qc):
     wb={name:{'columns':list(df.columns),'rows':json.loads(df.to_json(orient='values'))} for name,df in tables.items()}
     for name,df in [('Analysis_Parameters',pd.DataFrame(par)),('Treatment_Mapping',mapping),('Data_Dictionary',pd.DataFrame(dictionary))]:
         wb[name]={'columns':list(df.columns),'rows':json.loads(df.to_json(orient='values'))}
-    (out/'Methods'/'workbook_data.json').write_text(json.dumps(wb,allow_nan=False))
-    versions=json.loads((out/'Methods'/'Run_Manifest.json').read_text())
+    (out/'Methods'/'workbook_data.json').write_text(json.dumps(wb,allow_nan=False), encoding='utf-8')
+    versions=json.loads((out/'Methods'/'Run_Manifest.json').read_text(encoding='utf-8'))
     requirements=[f'numpy=={versions["numpy"]}',f'scipy=={versions["scipy"]}',f'scikit-image=={versions["skimage"]}',
                   f'pandas=={versions["pandas"]}',f'tifffile=={versions["tifffile"]}',f'matplotlib=={matplotlib.__version__}']
     if versions.get('imagecodecs'):
         requirements.append(f'imagecodecs=={versions["imagecodecs"]}')
-    (out/'Methods'/'requirements.txt').write_text('\n'.join(requirements)+'\n')
+    (out/'Methods'/'requirements.txt').write_text('\n'.join(requirements)+'\n', encoding='utf-8')
     channels=', '.join(f'C{c} ({marker_name(p,c)})' for c in p['foci_channels'])
     nuclear=f"C{p['nuclear_channel']} ({marker_name(p,p['nuclear_channel'])})"
     floors='; '.join(f"C{c}: support {p['foci'][f'channel_{c}']['support_floor_adu']:g}, seed {p['foci'][f'channel_{c}']['seed_floor_adu']:g}, prominence {p['foci'][f'channel_{c}']['prominence_floor_adu']:g} ADU" for c in p['foci_channels'])
@@ -528,6 +621,8 @@ Annotated_QC figures show paired raw and overlay views plus label masks for each
 
 Input intensity figures are exported separately for each combined treatment_group and selected channel as QC/C{{channel}}_Input_Intensity_Group_{{index:03d}}.png and .svg. Group indices follow the image mapping's treatment order, and colors match the comparison figures. Faint curves (alpha 0.25) represent individual images; the thicker solid curve is the arithmetic mean of their probability densities. The dashed vertical line is the arithmetic mean of their raw mean pixel intensities. Each image receives equal weight in both averages, regardless of its dimensions. Bins and logarithmic axis limits are shared across groups within each channel. Each image's histogram counts are divided by its total pixel count and bin widths, including zero pixels in the normalization; zero intensity is omitted from the logarithmic axis but included in the raw mean. Thus the density integral can be below one when zero pixels are present. All-zero images contribute zero density and zero mean, with an annotation instead of a vertical line at zero. Legends contain only three entries. Scatter markers use one fixed small size (8 points squared), and treatment-axis labels are rotated 45 degrees and right aligned.
 
+Treatment colors use the first 32 colors of Colorcet's Glasbey dark palette, designed for white backgrounds, assigned in the saved image mapping's treatment order. Boxes, points, distribution curves and input-intensity figures share those assignments across channels. Colors repeat only after 32 treatment groups.
+
 Saturation uses each input dtype's maximum stored value: 255 for uint8, 65535 for uint16. For RGB exports this measures clipping of exported color components, not detector saturation. The source files do not necessarily specify detector effective bit depth; absence of container saturation cannot prove absence of detector clipping. Per-image saturation values are in Treatment_Group_Mapping.csv. Observed maxima and saturation fractions should be reviewed in Input_Intensity_Distributions.csv and the saved QC tables.
 
 QC_Summary.csv reports fixed numerical and dataset-relative flags, with exact cutoffs in Output_Parameters.json. These include nuclear counts/exclusions, shape concerns, background, saturation, count extremes, size extremes, intensity tails, contrast, density and threshold sensitivity. Flags request inspection and never exclude images. Dataset-relative heuristics have limited reliability with few images. Genuine treatment biology can trigger a flag.
@@ -538,6 +633,8 @@ Threshold sensitivity reruns each nucleus at common factors {sensitivity_factors
 The experimental structure is focus -> nucleus -> image -> treatment. The reports are descriptive: no hypothesis tests, p-values, biological confidence intervals or multiple-comparison correction are reported. Replicate structure must be assessed from the experiment metadata. Cellular/focus distribution plots visualize heterogeneity only. Image-level plots preserve the experimental hierarchy. The observed treatment ranking cannot establish a reproducible biological treatment effect.
 
 Image_Level_Endpoints and Focus_Positive_Nuclei use saved image-level measurements, grouped by combined treatment_group. Boxes show the median and interquartile range (IQR); whiskers extend to the most extreme observations within 1.5 times the IQR of the quartiles. Separate outlier symbols are hidden because every valid image appears once per metric as a circular point (size 8 points squared, alpha 0.25), with reproducible horizontal jitter within ±0.16 of its treatment position. Points have no image ID, count or percentage annotations. Missing and nonfinite values are omitted per metric while their treatment categories remain visible. A single-image group has a collapsed box and one point. Treatment labels are rotated 45 degrees and right aligned; the separate focus-positive percentage axis spans 0–110%.
+
+Experiment_Summary.png and Experiment_Summary.svg combine four saved image-level endpoints and three ECDFs per selected foci channel. ECDFs use all finite nucleus counts (including zero-focus nuclei), individual focus areas, and individual focus mean raw intensities. Area and intensity ECDF axes are logarithmic when positive observations exist. Exactly two selected foci channels add a scatter of their paired counts from each usable nucleus row, colored by combined treatment_group; zero counts are retained and pairs with nonfinite counts are omitted. The scatter is descriptive, without fitted lines, correlation statistics, or significance tests. Summary generation uses saved tables without reading raw images or repeating segmentation.
 
 This analysis measures objects in 2D projections, not 3D foci: overlap in Z can merge distinct foci and alter areas. Signal background subtraction, thresholds, resolution and the field selected affect counts. No cross-channel colocalization or biological comparison is performed. Nuclear annotation and focus ground truth would be needed to estimate precision/recall and validate absolute counts.
 
@@ -556,7 +653,7 @@ The optional workbook renderer still has C2/C3 column-order assumptions. It uses
 ## Algorithm references
 scikit-image official documentation: [morphology and h-maxima](https://scikit-image.org/docs/0.26.x/api/skimage.morphology.html), [marker-controlled watershed](https://scikit-image.org/docs/0.26.x/api/skimage.segmentation.html#skimage.segmentation.watershed), and [region measurements](https://scikit-image.org/docs/0.26.x/api/skimage.measure.html). These document implementations; they do not validate the selected parameters for this assay.
 '''
-    (out/'Methods'/'Methods.md').write_text(methods)
+    (out/'Methods'/'Methods.md').write_text(methods, encoding='utf-8')
 
 
 def report(out,mapping,images,cell,focus,qc,p):
@@ -572,8 +669,9 @@ def report(out,mapping,images,cell,focus,qc,p):
     summary=images[cols].copy();summary.columns=labels
     totals=' · '.join(f'C{c} {marker_name(p,c)}: {int((focus.channel==c).sum()):,} foci' for c in channels)
     body='''<!doctype html><html><head><meta charset="utf-8"><title>Foci analysis review</title><style>
-body{font:16px/1.55 system-ui,Arial;color:#203043;background:#f7f9fb;max-width:1250px;margin:auto;padding:35px}h1{font-size:32px}h2{margin-top:2.2em}a{color:#006b9c}table{border-collapse:collapse;background:white;width:100%;font-size:14px}th,td{padding:10px;border-bottom:1px solid #dbe2e9;text-align:left}th{background:#243c50;color:white}img{max-width:100%;height:auto}article{background:white;padding:22px;margin:18px 0;border:1px solid #dbe2e9;border-radius:8px}.note{border-left:4px solid #d69132;padding:12px 18px;background:#fff6e8}.gallery{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}.gallery img{width:100%}summary{cursor:pointer;font-weight:600}small{color:#526779}.links a{margin-right:18px}li{margin-bottom:7px}</style></head><body>'''
+body{font:16px/1.55 system-ui,Arial;color:#203043;background:#f7f9fb;max-width:1250px;margin:auto;padding:35px}h1{font-size:32px}h2{margin-top:2.2em}a{color:#006b9c}table{border-collapse:collapse;background:white;width:100%;font-size:14px}th,td{padding:10px;border-bottom:1px solid #dbe2e9;text-align:left}th{background:#243c50;color:white}img{max-width:100%;height:auto}article{background:white;padding:22px;margin:18px 0;border:1px solid #dbe2e9;border-radius:8px}.treatment-images{background:white;padding:18px 22px;margin:14px 0;border:1px solid #dbe2e9;border-radius:8px}.note{border-left:4px solid #d69132;padding:12px 18px;background:#fff6e8}.gallery{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}.gallery img{width:100%}summary{cursor:pointer;font-weight:600}small{color:#526779}.links a{margin-right:18px}li{margin-bottom:7px}</style></head><body>'''
     body+=f'<h1>Fluorescent foci quantification</h1><p>{len(mapping)} images · {mapping.treatment_group.nunique()} groups · {len(cell)} usable nuclei · {esc(totals)}</p>'
+    body+='<p class="links"><a href="Experiment_Summary.png">Experiment summary (PNG)</a><a href="Experiment_Summary.svg">Experiment summary (editable SVG)</a></p>'
     body+='<p class="note">All comparisons are descriptive. Nuclei and foci are nested within images. Detected objects and 2D areas require QC review; dense and faint signal remain sources of uncertainty.</p>'
     if 'input_format' in mapping and mapping.input_format.eq('rgb_export').any():
         body+='<p class="note">RGB export analysis: channels use the saved color mapping. Intensities are stored color-component values, not recovered detector ADU. Export display settings and clipping can affect measurements; treat these results as exploratory.</p>'
@@ -584,22 +682,6 @@ body{font:16px/1.55 system-ui,Arial;color:#203043;background:#f7f9fb;max-width:1
     body+=f'<p>Nuclear segmentation: {esc(nuclear)}. Marker labels come from the analysis configuration. Border nuclei are excluded; focus-negative nuclei remain in summaries. Per-image calibration is recorded in the image mapping.</p>'
     body+='<h2>QC findings</h2><p>Flags identify inspection targets and never exclude images. Full reasons, thresholds and sensitivity counts are in the QC table.</p>'
     body+=qc[['image_id','channel','number_usable_nuclei','number_excluded_nuclei','manual_inspection_warnings']].to_html(index=False,border=0)
-    body+='<h2>Inspect every image</h2><p>Open the full annotated image to zoom. Yellow outlines mark counted objects; cyan marks analyzed nuclei and red marks excluded nuclei. Colors in label masks distinguish objects, not intensity.</p>'
-    for _,m in mapping.iterrows():
-        im=m.image_id;body+=f'<article><h3>{esc(im)} · {esc(m.treatment_group)}</h3><small>{esc(m.image_name)}</small>'
-        body+=f'<a href="QC/{im}_Annotated_QC.png"><img loading="lazy" src="QC/{im}_Annotated_QC.png"></a>'
-        body+='<p class="links">'
-        for c in p['foci_channels']:
-            if detailed:body+=f'<a href="QC/Native_Overlays/{im}_C{c}_foci_outlines.png">C{c} native overlay</a>'
-            body+=f'<a href="Masks/{im}_C{c}_foci.tif">C{c} label TIFF</a>'
-        if detailed:body+=f'<a href="QC/Native_Overlays/{im}_C{p["nuclear_channel"]}_nuclear_outlines.png">Nuclear overlay</a>'
-        body+=f'<a href="Masks/{im}_nuclei.tif">Nuclear label TIFF</a></p>'
-        if detailed:
-            body+=f'<details><summary>All {len(cell[cell.image_id==im])} analyzed nuclei, individually</summary><div class="gallery">'
-            for _,cr in cell[cell.image_id==im].iterrows():
-                nid=cr.nucleus_id;body+=f'<a href="QC/Nucleus_Crops/{nid}.png"><img loading="lazy" src="QC/Nucleus_Crops/{nid}.png"><small>{nid}</small></a>'
-            body+='</div></details>'
-        body+='</article>'
     body+='<h2>Treatment comparisons within each channel</h2>'
     for c in p['foci_channels']:
         body+=f'<article><h3>Channel {c} · '+esc(marker_name(p,c))+'</h3>'
@@ -622,8 +704,29 @@ body{font:16px/1.55 system-ui,Arial;color:#203043;background:#f7f9fb;max-width:1
     body+='<h2>Files and reproducibility</h2><ul>'
     for f in ['Results/Image_Summary.csv','Results/Cell_Summary.csv','Results/Focus_Data.csv','QC/Nucleus_Inclusion_Audit.csv','QC/Focus_Candidate_Audit.csv','QC/Threshold_Sensitivity.csv','QC/Input_Intensity_Distributions.csv','Methods/Applied_Thresholds.csv','Methods/Data_Dictionary.csv','Methods/Run_Manifest.json','Methods/Validation_Report.json','Methods/Methods.md']:
         body+=f'<li><a href="{f}">{f}</a></li>'
-    body+='</ul><p>No cross-channel colocalization analysis was performed. Thresholds and object definitions were shared across treatments. Run parameters and provenance are in Methods/; reusable tools are kept separately in the scripts folder.</p></body></html>'
-    (out/'Review.html').write_text(body)
+    body+='</ul><p>No cross-channel colocalization analysis was performed. Thresholds and object definitions were shared across treatments. Run parameters and provenance are in Methods/; reusable tools are kept separately in the scripts folder.</p>'
+    body+='<h2>Inspect every image</h2><p>Expand a treatment group to inspect its images. Open the full annotated image to zoom. Yellow outlines mark counted objects; cyan marks analyzed nuclei and red marks excluded nuclei. Colors in label masks distinguish objects, not intensity.</p>'
+    for group,fields in mapping.groupby('treatment_group',sort=False,dropna=False):
+        count=len(fields)
+        body+=f'<details class="treatment-images"><summary>{esc(group)} · {count} image{"s" if count!=1 else ""}</summary>'
+        for _,m in fields.iterrows():
+            im=m.image_id;body+=f'<article><h3>{esc(im)} · {esc(m.treatment_group)}</h3><small>{esc(m.image_name)}</small>'
+            body+=f'<a href="QC/{im}_Annotated_QC.png"><img loading="lazy" src="QC/{im}_Annotated_QC.png"></a>'
+            body+='<p class="links">'
+            for c in p['foci_channels']:
+                if detailed:body+=f'<a href="QC/Native_Overlays/{im}_C{c}_foci_outlines.png">C{c} native overlay</a>'
+                body+=f'<a href="Masks/{im}_C{c}_foci.tif">C{c} label TIFF</a>'
+            if detailed:body+=f'<a href="QC/Native_Overlays/{im}_C{p["nuclear_channel"]}_nuclear_outlines.png">Nuclear overlay</a>'
+            body+=f'<a href="Masks/{im}_nuclei.tif">Nuclear label TIFF</a></p>'
+            if detailed:
+                body+=f'<details><summary>All {len(cell[cell.image_id==im])} analyzed nuclei, individually</summary><div class="gallery">'
+                for _,cr in cell[cell.image_id==im].iterrows():
+                    nid=cr.nucleus_id;body+=f'<a href="QC/Nucleus_Crops/{nid}.png"><img loading="lazy" src="QC/Nucleus_Crops/{nid}.png"><small>{nid}</small></a>'
+                body+='</div></details>'
+            body+='</article>'
+        body+='</details>'
+    body+='</body></html>'
+    (out/'Review.html').write_text(body, encoding='utf-8')
     lines=['# Foci analysis report','',f'Processed {len(mapping)} images; {len(cell)} nuclei analyzed.',
            f'Nuclear channel: {nuclear}.',totals,'',
            'Descriptive measurements of segmented 2D nuclear objects; no inferential tests.','',
@@ -636,12 +739,13 @@ body{font:16px/1.55 system-ui,Arial;color:#203043;background:#f7f9fb;max-width:1
     if p.get('group_names'):
         lines+=['','Comparisons use combined treatment_group labels. Each image, nucleus, and focus contributes once to its treatment group.']
     lines+=['','Major outputs:','', '- Review.html: linked review report'+(' and nucleus galleries.' if detailed else '.'),
+            '- [Experiment_Summary.png](Experiment_Summary.png) and [Experiment_Summary.svg](Experiment_Summary.svg): experiment overview with image-level endpoints, ECDFs, and a nucleus scatter when exactly two foci channels are selected.',
             '- Results/: image, cell, focus, and QC measurement tables.',
             '- QC/: annotated figures, '+('native overlays, nucleus crops, ' if detailed else '')+'shared-contrast figures, per-treatment input intensity plots (PNG and SVG), and QC metrics.',
             '- Plots/: '+', '.join(f'Channel_{c}' for c in channels)+'; comparison figures in PNG and SVG.',
             '- Methods/Output_Parameters.json: parameters and channel selection for this report.',
             '', 'Limitations: 2D projections; no manual ground truth. Dense or dim foci are parameter sensitive. See Methods/Methods.md for definitions.']
-    (out/'Report.md').write_text('\n'.join(lines)+'\n')
+    (out/'Report.md').write_text('\n'.join(lines)+'\n', encoding='utf-8')
 
 
 def main():
@@ -668,11 +772,11 @@ def main():
     # Derive treatment groups and colors from this run rather than the pilot dataset.
     global GROUPS,LABELS,COLORS
     GROUPS=list(mapping.treatment_group.unique());LABELS=[g.replace('ART558_20PDS','ART558 + 20PDS') for g in GROUPS]
-    palette=['#0072B2','#D55E00','#009E73','#CC79A7','#E69F00','#56B4E9','#000000']
-    COLORS=[palette[i%len(palette)] for i in range(len(GROUPS))]
-    (out/'Methods'/'Output_Parameters.json').write_text(json.dumps(p,indent=2))
+    COLORS=[TREATMENT_PALETTE[i%len(TREATMENT_PALETTE)] for i in range(len(GROUPS))]
+    (out/'Methods'/'Output_Parameters.json').write_text(json.dumps(p,indent=2), encoding='utf-8')
     make_qc(out,mapping,cell,focus,p)
     make_plots(out,cell,focus,images,p)
+    make_experiment_summary(out,mapping,images,cell,focus,p)
     print('Writing methods and review reports...',flush=True)
     build_methods(out,p,mapping,images,cell,focus,qc)
     report(out,mapping,images,cell,focus,qc,p)

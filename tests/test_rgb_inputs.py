@@ -61,7 +61,7 @@ class RGBInputTests(unittest.TestCase):
             signal[53:56,54:57]=255
             cyx=np.array([nuclear,signal,signal*.6],dtype=np.uint8)
             rgb=np.moveaxis(cyx[[2,1,0]],0,2)
-            params=copy.deepcopy(json.loads((SCRIPTS/'parameters.template.json').read_text()))
+            params=copy.deepcopy(json.loads((SCRIPTS/'parameters.template.json').read_text(encoding='utf-8')))
             params['channels']={'1':'Nuclear stain','2':'gH2AX','3':'RAD51'}
             config=root/'parameters.json';config.write_text(json.dumps(params))
 
@@ -107,12 +107,12 @@ class RGBInputTests(unittest.TestCase):
                          'QC/Native_Overlays/I01_C1_nuclear_outlines.png',
                          'QC/Native_Overlays/I01_C2_foci_outlines.png','QC/Nucleus_Crops/I01_N001.png']:
                 self.assertTrue((outputs['rgb']/name).exists(),name)
-            methods=(outputs['rgb']/'Methods/Methods.md').read_text()
+            methods=(outputs['rgb']/'Methods/Methods.md').read_text(encoding='utf-8')
             self.assertIn('blue, green, red',methods)
             self.assertIn('0–255',methods)
             self.assertIn('do not recover original detector ADU',methods)
-            self.assertIn('RGB export analysis',(outputs['rgb']/'Review.html').read_text())
-            manifest=json.loads((outputs['rgb']/'Methods/Run_Manifest.json').read_text())
+            self.assertIn('RGB export analysis',(outputs['rgb']/'Review.html').read_text(encoding='utf-8'))
+            manifest=json.loads((outputs['rgb']/'Methods/Run_Manifest.json').read_text(encoding='utf-8'))
             self.assertEqual(manifest['rgb_channel_order'],ORDER['rgb_channel_order'])
             self.assertIn('image_reader_sha256',manifest)
 

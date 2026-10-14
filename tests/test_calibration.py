@@ -85,7 +85,7 @@ class CalibrationTests(unittest.TestCase):
             self.assertEqual(len(cells),1)
             np.testing.assert_allclose(cells.nuclear_area_um2,cells.nuclear_area_px*.2*.25)
             for name in ['Effective_Parameters','Run_Manifest']:
-                saved=json.loads((out/f'Methods/{name}.json').read_text())
+                saved=json.loads((out/f'Methods/{name}.json').read_text(encoding='utf-8'))
                 self.assertEqual(saved['pixel_size_um'],[.2,.25])
             result=subprocess.run([sys.executable,str(SCRIPTS/'validate_results.py'),'--output-dir',str(out)],
                                   capture_output=True,text=True)

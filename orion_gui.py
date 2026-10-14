@@ -12,27 +12,27 @@ import tempfile
 
 try:
     from PySide6.QtCore import Qt, QProcess, QThread, QTimer, Signal, QUrl
-    from PySide6.QtGui import QColor, QDesktopServices, QImage, QPainter, QPixmap
+    from PySide6.QtGui import QColor, QDesktopServices, QIcon, QImage, QPainter, QPixmap
     from PySide6.QtWidgets import (
-        QApplication, QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox,
-        QFileDialog, QFormLayout, QGraphicsScene, QGraphicsView, QGroupBox,
+        QApplication, QAbstractItemView, QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox,
+        QFileDialog, QFormLayout, QGraphicsScene, QGraphicsView, QGridLayout, QGroupBox,
         QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox,
         QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSplitter,
-        QTabWidget, QTableWidget, QTableWidgetItem, QToolButton, QTreeWidget,
+        QTabBar, QTabWidget, QTableWidget, QTableWidgetItem, QToolButton, QTreeWidget,
         QTreeWidgetItem, QVBoxLayout, QWidget,
     )
 except ImportError:
-    raise SystemExit('The desktop GUI needs Qt. Install it with: python -m pip install -r requirements-gui.txt')
+    raise SystemExit('The desktop GUI needs Qt. Install it with: python -m pip install -r requirements.txt')
 
 try:
     import numpy as np
     import pandas as pd
-    from gui_analysis import (FLOOR_KEYS, analyze_preview, list_images,
+    from gui_analysis import (FLOOR_KEYS, analyze_preview, default_display_colors, list_images,
                               render_image, validate_parameters, validate_run_paths)
     from image_io import inspect_image
 except ImportError as exc:
     raise SystemExit('Analysis dependencies are missing. Using Python 3.12, install '
-                     'requirements-gui.txt in your environment: python -m pip install -r requirements-gui.txt') from exc
+                     'requirements.txt in your environment: python -m pip install -r requirements.txt') from exc
 
 ROOT = Path(__file__).resolve().parent
 APP_STYLE = '''
@@ -47,7 +47,7 @@ APP_STYLE = '''
     QTabWidget::pane { border: 1px solid palette(mid); }
 '''
 BASIC_KEYS = {'group_names', 'nuclear_channel', 'foci_channels', 'nuclear.fixed_threshold_adu',
-              'qc_output', 'rgb_channel_order'}
+              'qc_output', 'rgb_channel_order', 'gui_display'}
 # These strings describe fixed algorithms; editing them would not change execution.
 METHOD_KEYS = {
     'analysis_version', 'input_axis_order', 'analysis_unit', 'statistical_testing',
@@ -218,7 +218,7 @@ class OrionWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle('scikitORION · Nuclear & foci analysis')
         self.resize(1320, 950)
-        self.parameters = json.loads((ROOT / 'parameters.template.json').read_text())
+        self.parameters = json.loads((ROOT / 'parameters.template.json').read_text(encoding='utf-8'))
         self.parameters.setdefault('rgb_channel_order', None)
         self.parameters.setdefault('pixel_size_um', None)
         self.images, self.preview, self.pixels, self.metadata = [], None, None, None
@@ -229,6 +229,7 @@ class OrionWindow(QMainWindow):
         self.run_output = None
         self.table_origin = None
         self.layer_checks = {}
+        self.signal_colors, self.outline_colors, self.color_buttons = {}, {}, {}
         self.foci_checks, self.floors = {}, {}
         self.process = QProcess(self)
         self.process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
@@ -380,15 +381,18 @@ class OrionWindow(QMainWindow):
         self.image_info = QLabel('Load TIFF images to begin')
         image_row.addWidget(self.image_info)
         layout.addLayout(image_row)
+        self.view_tabs = QTabBar()
+        for name in ('Raw image', 'Nuclei', 'Foci', 'Overlay'):
+            self.view_tabs.addTab(name)
+        self.view_tabs.setCurrentIndex(3)
+        self.view_tabs.setAccessibleName('Image view tabs')
+        self.view_tabs.currentChanged.connect(self.draw)
+        layout.addWidget(self.view_tabs)
         view_row = QHBoxLayout()
-        self.mode = QComboBox()
-        self.mode.addItems(['Raw image', 'Nuclei', 'Foci', 'Overlay'])
-        self.mode.setCurrentText('Overlay')
-        self.mode.setAccessibleName('Image view')
-        self.mode.currentIndexChanged.connect(self.draw)
-        view_row.addWidget(self.mode)
+        view_row.addWidget(QLabel('Display channel'))
         self.raw_channel = QComboBox()
         self.raw_channel.setAccessibleName('Display channel')
+        self.raw_channel.setEnabled(False)
         self.raw_channel.currentIndexChanged.connect(self.draw)
         view_row.addWidget(self.raw_channel)
         view_row.addStretch()
@@ -403,6 +407,18 @@ class OrionWindow(QMainWindow):
         self.layers_layout = QHBoxLayout(self.layers)
         self.layers_layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.layers)
+        self.colors_toggle = QToolButton()
+        self.colors_toggle.setText('Channel colors')
+        self.colors_toggle.setCheckable(True)
+        self.colors_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.colors_toggle.setArrowType(Qt.ArrowType.RightArrow)
+        layout.addWidget(self.colors_toggle)
+        self.colors_panel = QWidget()
+        self.colors_layout = QGridLayout(self.colors_panel)
+        self.colors_layout.setContentsMargins(0, 0, 0, 0)
+        self.colors_panel.hide()
+        self.colors_toggle.toggled.connect(self.toggle_colors)
+        layout.addWidget(self.colors_panel)
         self.tabs = QTabWidget()
         self.tabs.setMaximumHeight(300)
         self.inspector = QWidget()
@@ -506,6 +522,7 @@ class OrionWindow(QMainWindow):
 
     def load_controls(self):
         p = self.parameters
+        self.signal_colors, self.outline_colors = self.read_display_colors(p)
         self.groups.setText(', '.join(p.get('group_names', [])))
         order = p.get('rgb_channel_order')
         self.rgb_enabled.blockSignals(True)
@@ -529,6 +546,7 @@ class OrionWindow(QMainWindow):
         self.threshold_changed(invalidate=False)
         self.qc_mode.setCurrentText(p.get('qc_output', 'minimal'))
         count = max(3, p.get('nuclear_channel', 1), *p.get('foci_channels', [2, 3]),
+                    *self.signal_colors, *self.outline_colors,
                     *[int(k) for k in p.get('channels', {}) if k.isdecimal()],
                     *[int(k[8:]) for k in p['foci'] if k.startswith('channel_') and k[8:].isdecimal()])
         self.build_channels(count)
@@ -564,6 +582,83 @@ class OrionWindow(QMainWindow):
         self.nuclear.setCurrentIndex(self.nuclear.findData(p['nuclear_channel']))
         self.nuclear.blockSignals(False)
         self.rebuild_layers()
+        self.rebuild_color_controls()
+
+    @staticmethod
+    def read_display_colors(parameters):
+        settings = parameters.get('gui_display', {})
+        if not isinstance(settings, dict) or not isinstance(settings.get('channels', {}), dict):
+            raise ValueError('gui_display must contain a channels object.')
+        signals, outlines = {}, {}
+        for channel, values in settings.get('channels', {}).items():
+            if not isinstance(channel, str) or not channel.isdecimal() or int(channel) < 1 or not isinstance(values, dict):
+                raise ValueError('Display colors must use positive channel numbers and color objects.')
+            for key, palette in [('signal', signals), ('outline', outlines)]:
+                if key in values:
+                    value = values[key]
+                    if not isinstance(value, str) or not QColor(value).isValid():
+                        raise ValueError(f'Channel {channel} {key} color must be a valid color name or hex value.')
+                    palette[int(channel)] = QColor(value).name()
+        return signals, outlines
+
+    def rebuild_color_controls(self):
+        self.clear_layout(self.colors_layout)
+        self.color_buttons = {}
+        for column, name in enumerate(('Channel', 'Signal / mask', 'Outline')):
+            self.colors_layout.addWidget(QLabel(name), 0, column)
+        n = self.nuclear.currentData()
+        for channel in self.foci_checks:
+            signal, outline = default_display_colors(channel, n)
+            self.signal_colors.setdefault(channel, QColor(*signal).name())
+            self.outline_colors.setdefault(channel, QColor(*outline).name())
+            self.colors_layout.addWidget(QLabel(f'Channel {channel}'), channel, 0)
+            for column, kind in enumerate(('signal', 'outline'), start=1):
+                button = QPushButton()
+                button.setAccessibleName(f'Channel {channel} {kind} color')
+                button.clicked.connect(lambda _=False, c=channel, k=kind: self.choose_display_color(c, k))
+                self.colors_layout.addWidget(button, channel, column)
+                self.color_buttons[channel, kind] = button
+                self.update_color_button(channel, kind)
+        reset = QPushButton('Reset colors')
+        reset.clicked.connect(self.reset_display_colors)
+        self.colors_layout.addWidget(reset, len(self.foci_checks) + 1, 0)
+        help_text = QLabel('Display only · colors stay with their channel and are saved with Save JSON…')
+        help_text.setWordWrap(True)
+        self.colors_layout.addWidget(help_text, len(self.foci_checks) + 1, 1, 1, 2)
+
+    def toggle_colors(self, checked):
+        self.colors_panel.setVisible(checked)
+        self.colors_toggle.setArrowType(Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow)
+
+    def update_color_button(self, channel, kind):
+        palette = self.signal_colors if kind == 'signal' else self.outline_colors
+        color = QColor(palette[channel])
+        swatch = QPixmap(18, 18)
+        swatch.fill(color)
+        button = self.color_buttons[channel, kind]
+        button.setIcon(QIcon(swatch))
+        button.setText(color.name().upper())
+
+    def choose_display_color(self, channel, kind):
+        palette = self.signal_colors if kind == 'signal' else self.outline_colors
+        color = QColorDialog.getColor(QColor(palette[channel]), self, f'Channel {channel} · {kind} color')
+        if color.isValid():
+            self.set_display_color(channel, kind, color)
+
+    def set_display_color(self, channel, kind, color):
+        color = QColor(color)
+        if not color.isValid() or kind not in {'signal', 'outline'}:
+            raise ValueError('Choose a valid signal or outline color.')
+        palette = self.signal_colors if kind == 'signal' else self.outline_colors
+        palette[channel] = color.name()
+        if (channel, kind) in self.color_buttons:
+            self.update_color_button(channel, kind)
+        self.draw()
+
+    def reset_display_colors(self):
+        self.signal_colors, self.outline_colors = {}, {}
+        self.rebuild_color_controls()
+        self.draw()
 
     def channel_changed(self, *_):
         for channel, (box, _) in self.floors.items():
@@ -637,6 +732,10 @@ class OrionWindow(QMainWindow):
     def collect_parameters(self):
         p = deepcopy(self.parameters)
         self.advanced.apply(p)
+        display = p.setdefault('gui_display', {})
+        display['channels'] = {str(channel): {'signal': self.signal_colors[channel],
+                                             'outline': self.outline_colors[channel]}
+                               for channel in self.signal_colors}
         p['rgb_channel_order'] = None
         if self.rgb_enabled.isChecked():
             order = [color.currentData() for color in self.rgb_colors]
@@ -662,12 +761,13 @@ class OrionWindow(QMainWindow):
             return
         try:
             path = self.parameter_path()
-            p = json.loads(path.read_text())
+            p = json.loads(path.read_text(encoding='utf-8'))
             if not isinstance(p, dict):
                 raise ValueError('The parameter file must contain a JSON object.')
             p.setdefault('rgb_channel_order', None)
             p.setdefault('pixel_size_um', None)
             p = validate_parameters(p)
+            self.read_display_colors(p)
             self.parameters = p
             self.invalidate_preview()
             self.pixels, self.metadata = None, None
@@ -827,6 +927,8 @@ class OrionWindow(QMainWindow):
         self.log.appendPlainText(message)
 
     def draw(self, *_, fit=False):
+        mode = self.view_tabs.tabText(self.view_tabs.currentIndex())
+        self.raw_channel.setEnabled(mode == 'Raw image')
         if self.pixels is None:
             return
         # A previous image may have fewer channels than newly chosen controls.
@@ -835,8 +937,6 @@ class OrionWindow(QMainWindow):
         if max([n, *foci]) > self.pixels.shape[0]:
             return
         p = dict(nuclear_channel=n, foci_channels=foci)
-        mode = self.mode.currentText()
-        self.raw_channel.setEnabled(mode == 'Raw image')
         if self.preview is None and mode in ('Nuclei', 'Foci'):
             rgb = np.zeros((*self.pixels.shape[1:], 3), dtype=np.uint8)
         else:
@@ -845,7 +945,9 @@ class OrionWindow(QMainWindow):
                 return
             rgb = render_image(self.pixels, p, self.preview, mode, raw_channel,
                                [c for c, check in self.layer_checks.items() if check.isChecked()],
-                               self.outlines.isChecked(), self.selected)
+                               self.outlines.isChecked(), self.selected,
+                               {c: QColor(color).getRgb()[:3] for c, color in self.signal_colors.items()},
+                               {c: QColor(color).getRgb()[:3] for c, color in self.outline_colors.items()})
         self.viewer.show_rgb(rgb, self.metadata, fit)
 
     def pick_nucleus(self, x, y):
@@ -919,7 +1021,7 @@ class OrionWindow(QMainWindow):
                 self.inspect_input(path, p)
             self.run_temp = tempfile.TemporaryDirectory(prefix='orion-gui-')
             snapshot = Path(self.run_temp.name) / 'parameters.json'
-            snapshot.write_text(json.dumps(p, indent=2, allow_nan=False))
+            snapshot.write_text(json.dumps(p, indent=2, allow_nan=False), encoding='utf-8')
             self.run_output = output
             self.run_parameters = deepcopy(p)
             self.cancel_requested = False
@@ -941,7 +1043,7 @@ class OrionWindow(QMainWindow):
     def start_process(self, script, args):
         self.decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
         self.process.setWorkingDirectory(str(ROOT))
-        self.process.start(sys.executable, ['-u', str(ROOT / script), *args])
+        self.process.start(sys.executable, ['-X', 'utf8', '-u', str(ROOT / script), *args])
         self.statusBar().showMessage({'analysis': 'Analyzing images…', 'outputs': 'Generating QC and reports…',
                                      'validation': 'Validating saved results…'}[self.stage])
 
@@ -1011,7 +1113,7 @@ class OrionWindow(QMainWindow):
         try:
             output = Path(directory if directory and not isinstance(directory, bool) else self.output_dir.text()).expanduser().resolve()
             frame = pd.read_csv(output / 'Results' / 'Cell_Summary.csv')
-            parameters = json.loads((output / 'Methods' / 'Effective_Parameters.json').read_text())
+            parameters = json.loads((output / 'Methods' / 'Effective_Parameters.json').read_text(encoding='utf-8'))
             channels = ', '.join(f'Channel {c}' for c in parameters['foci_channels'])
             self.show_table(frame, f'Saved run · {output.name} · nuclear Channel {parameters["nuclear_channel"]} · foci {channels}', 'saved')
             self.run_output = output

@@ -27,9 +27,9 @@ def resolve_channels(out, nuclear_channel=None, foci_channels=None):
     for name in ['parameters.json', 'Effective_Parameters.json']:
         path = methods / name
         if path.exists():
-            parameters.update(json.loads(path.read_text()))
+            parameters.update(json.loads(path.read_text(encoding='utf-8')))
     manifest_path = methods / 'Run_Manifest.json'
-    manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
+    manifest = json.loads(manifest_path.read_text(encoding='utf-8')) if manifest_path.exists() else {}
     for key in ['nuclear_channel', 'foci_channels', 'rgb_channel_order', 'pixel_size_um']:
         if key in manifest:
             parameters[key] = manifest[key]

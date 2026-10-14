@@ -1,0 +1,38 @@
+name: Windows compatibility
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      ORION_NO_PAUSE: '1'
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: 'scikit ORION μ'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - name: Install using the double-click setup
+        working-directory: 'scikit ORION μ'
+        shell: cmd
+        run: call setup_windows.bat
+      - name: Check launcher from another directory
+        shell: cmd
+        run: |
+          chcp 65001 >nul
+          call "scikit ORION μ\launch_gui.bat" --help
+      - name: Run analysis and GUI regression checks
+        working-directory: 'scikit ORION μ'
+        shell: cmd
+        run: .venv-gui\Scripts\python.exe -m unittest discover -s tests -p "test*.py" -v

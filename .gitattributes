@@ -1,0 +1,2 @@
+# Native Command Prompt scripts need Windows line endings when checked out.
+*.bat text eol=crlf

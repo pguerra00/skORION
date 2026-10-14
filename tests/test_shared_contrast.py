@@ -83,7 +83,7 @@ class SharedContrastTests(unittest.TestCase):
             qc = pd.DataFrame(columns=['image_id', 'channel', 'number_usable_nuclei',
                                        'number_excluded_nuclei', 'manual_inspection_warnings'])
             outputs.report(out, mapping, images, cells, focus, qc, params)
-            review = (out / 'Review.html').read_text()
+            review = (out / 'Review.html').read_text(encoding='utf-8')
             for path in qdir.glob('*.png'):
                 self.assertIn(f'href="QC/{path.name}"', review)
                 self.assertIn(f'src="QC/{path.name}"', review)
