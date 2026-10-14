@@ -16,6 +16,7 @@ import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from channel_config import add_channel_arguments, resolve_channels, check_channel_inputs, marker_name, selected_columns
 from image_io import read_channels
+from progress_reporting import add_progress_argument, ProgressReporter, advance
 
 GROUPS=['20PDS','100MMC','ART558_20PDS']
 LABELS=['20PDS','100MMC','ART558 + 20PDS']
@@ -83,7 +84,7 @@ def shared_contrast_pages(mapping,c):
         yield f'C{c}_Shared_Contrast{suffix}.png',mapping.iloc[start:start+SHARED_CONTRAST_PAGE_SIZE]
 
 
-def make_shared_contrast(qdir,mapping,p):
+def make_shared_contrast(qdir,mapping,p,progress=None):
     """Render bounded grids with one dataset-wide display range per channel."""
     if mapping.empty:return
     for c in p['foci_channels']:
@@ -93,10 +94,12 @@ def make_shared_contrast(qdir,mapping,p):
             raw=read_channels(path,p)
             samples.append(raw[c-1,::4,::4].ravel().copy())
             del raw
+            advance(progress,f'Channel {c} · shared-contrast sample: {Path(path).name}')
         sample=np.concatenate(samples)
         del samples
         lim=np.percentile(sample,[1,99.9])
         del sample
+        advance(progress,f'Channel {c} · shared display range calculated')
         total=math.ceil(len(mapping)/SHARED_CONTRAST_PAGE_SIZE)
         for page,(filename,fields) in enumerate(shared_contrast_pages(mapping,c),1):
             ncols=min(SHARED_CONTRAST_COLUMNS,len(fields))
@@ -112,11 +115,12 @@ def make_shared_contrast(qdir,mapping,p):
                     scale_bar(ax,m.pixel_size_x_um)
                 fig.suptitle(f'Channel {c} · shared display range {lim[0]:.0f}–{lim[1]:.0f} ADU for all images · page {page}/{total}\nDisplay only. Bright pixels above the display range appear white.',fontsize=11)
                 fig.savefig(qdir/filename,dpi=200)
+                advance(progress,f'Channel {c} · shared-contrast page {page}/{total} saved')
             finally:
                 plt.close(fig)
 
 
-def make_qc(out,mapping,cell,focus,p):
+def make_qc(out,mapping,cell,focus,p,progress=None):
     qdir=out/'QC'
     detailed=p.get('qc_output','detailed')=='detailed'
     if detailed:
@@ -146,19 +150,25 @@ def make_qc(out,mapping,cell,focus,p):
                                   color='#00ffff' if included else '#ff8494',fontsize=6,ha='center',va='center')
                 axs[row,1].set_title('Nuclear outlines and IDs\ncyan N = analyzed; red X = excluded')
                 axs[row,2].imshow(label_rgb(nuc));axs[row,2].set_title(f'Nuclear label mask · {cell[cell.image_id==im].shape[0]} analyzed')
-                if detailed:save_rgb(qdir/'Native_Overlays'/f'{im}_C{c}_nuclear_outlines.png',rgb)
+                if detailed:
+                    save_rgb(qdir/'Native_Overlays'/f'{im}_C{c}_nuclear_outlines.png',rgb)
+                    advance(progress,f'{im} · Channel {c} · nuclear overlay saved')
             else:
                 rgb=overlay(a,lim,mask,nuc,exc)
                 axs[row,1].imshow(rgb);axs[row,1].set_title(f'C{c} counted foci outlined in yellow\n{len(focus[(focus.image_id==im)&(focus.channel==c)]):,} objects in usable nuclei')
                 axs[row,2].imshow(label_rgb(mask));axs[row,2].set_title(f'C{c} object label mask\ncolors distinguish adjacent objects')
                 if detailed:
                     save_rgb(qdir/'Native_Overlays'/f'{im}_C{c}_foci_outlines.png',rgb)
+                    advance(progress,f'{im} · Channel {c} · foci overlay saved')
                     save_rgb(qdir/'Native_Overlays'/f'{im}_C{c}_raw_display.png',np.repeat(norm(a,lim)[...,None],3,axis=2))
+                    advance(progress,f'{im} · Channel {c} · raw display saved')
                     save_rgb(qdir/'Native_Overlays'/f'{im}_C{c}_labels.png',label_rgb(mask))
+                    advance(progress,f'{im} · Channel {c} · label display saved')
             for ax in axs[row]:ax.set_xticks([]);ax.set_yticks([])
             scale_bar(axs[row,0],sx)
         fig.suptitle(f'{im} · {m.treatment_group} · {m.image_name}\n2D image. Display scaling is for QC only; measurements use stored pixel values.',fontsize=11)
         fig.savefig(qdir/f'{im}_Annotated_QC.png',dpi=260);plt.close(fig)
+        advance(progress,f'Image {index}/{len(mapping)} · annotated QC saved')
         # Per-nucleus paired raw/outline views include every usable nucleus.
         crops=cell[cell.image_id==im] if detailed else cell.iloc[:0]
         for _,cr in crops.iterrows():
@@ -182,10 +192,12 @@ def make_qc(out,mapping,cell,focus,p):
                 scale_bar(axs[row,0],sx,5)
             fig.suptitle(f'{cr.nucleus_id} · {m.treatment_group}\nYellow = counted focus boundary.',fontsize=11)
             fig.savefig(qdir/'Nucleus_Crops'/f'{cr.nucleus_id}.png',dpi=150);plt.close(fig)
+            advance(progress,f'{cr.nucleus_id} · nucleus crop saved')
         print(f'QC: {index}/{len(mapping)} images processed ({im})',flush=True)
     pd.DataFrame(displays).to_csv(qdir/'QC_Display_Ranges.csv',index=False)
+    advance(progress,'QC display ranges saved',force=True)
     print('Rendering shared-contrast QC figures...',flush=True)
-    make_shared_contrast(qdir,mapping,p)
+    make_shared_contrast(qdir,mapping,p,progress=progress)
 
 
 def treatment_ticks(ax,fontsize=8):
@@ -212,7 +224,7 @@ def stripbox(ax,df,col,ylabel,rng,log=False,point_alpha=None):
     elif ax.get_ylim()[0]>0:ax.set_ylim(bottom=0)
 
 
-def make_experiment_summary(out,mapping,image,cell,focus,p):
+def make_experiment_summary(out,mapping,image,cell,focus,p,progress=None):
     """One overview from saved measurements; each image/nucleus is used once."""
     print('Rendering experiment summary...',flush=True)
     channels=p['foci_channels'];paired=len(channels)==2
@@ -293,11 +305,12 @@ def make_experiment_summary(out,mapping,image,cell,focus,p):
         if rgb:caption+='\nRGB intensities are stored color-component values, not recovered detector ADU.'
         fig.supxlabel(caption,fontsize=9)
         figsave(fig,out,'Experiment_Summary')
+        advance(progress,'Experiment summary saved',force=True)
     finally:
         plt.close(fig)
 
 
-def make_plots(out,cell,focus,image,p):
+def make_plots(out,cell,focus,image,p,progress=None):
     rng=np.random.default_rng(p['random_seed_for_plot_jitter'])
     for c in p['foci_channels']:
         print(f'Rendering comparison plots for channel {c}...',flush=True)
@@ -319,6 +332,7 @@ def make_plots(out,cell,focus,image,p):
             for ax,(key,label) in zip(axs.flat,metrics):stripbox(ax,cell,f'C{c}_{key}',label,rng)
             fig.suptitle(f'Channel {c} · {name} · cellular distributions\nEach dot is one nucleus. Nuclei are nested within images; descriptive comparisons only.',fontsize=13)
             figsave(fig,folder,fname)
+            advance(progress,f'Channel {c} · {fname} saved')
         ff=focus[focus.channel==c]
         metrics=[('focus_area_um2','Focus area (μm²)'),('raw_mean_adu','Mean focus intensity (ADU)'),
                  ('raw_max_adu','Maximum focus intensity (ADU)'),('raw_integrated_adu_px','Integrated focus intensity (ADU·px)'),
@@ -327,6 +341,7 @@ def make_plots(out,cell,focus,image,p):
         for ax,(key,label) in zip(axs.flat,metrics):stripbox(ax,ff,key,label,rng,key in ['focus_area_um2','raw_integrated_adu_px'])
         fig.suptitle(f'Channel {c} · {name} · individual focus measurements\nDots are foci nested within nuclei and images. Boxes show median and IQR; no inference from pooled foci.',fontsize=13)
         figsave(fig,folder,'Focus_Properties')
+        advance(progress,f'Channel {c} · focus properties saved')
         metrics=[('mean_foci_per_nucleus','Mean foci / nucleus'),('median_foci_per_nucleus','Median foci / nucleus'),
                  ('mean_foci_density_per_um2','Mean density (μm⁻²)'),('percent_focus_positive_nuclei','Focus-positive nuclei (%)'),
                  ('mean_focus_area_um2','Mean focus area (μm²)'),('median_focus_area_um2','Median focus area (μm²)'),
@@ -347,6 +362,7 @@ def make_plots(out,cell,focus,image,p):
                         top=max(float(vals.max())*1.22,.01) if len(vals) else 1)
         fig.suptitle(f'Channel {c} · {name} · image-level comparisons\nBoxes: median and IQR; whiskers: observations within 1.5 × IQR. Faint points: individual images.\nDescriptive comparisons; nuclei are nested observations.',fontsize=14)
         figsave(fig,folder,'Image_Level_Endpoints')
+        advance(progress,f'Channel {c} · image-level endpoints saved')
         fig,axs=plt.subplots(1,3,figsize=(15,4.8),layout='constrained')
         for ax,df,key,label,lg in [(axs[0],cell,f'C{c}_foci_count','Foci per nucleus',False),
                                   (axs[1],ff,'focus_area_um2','Focus area (μm²)',True),
@@ -360,13 +376,15 @@ def make_plots(out,cell,focus,image,p):
                 ax.text(.5,.5,'No measurements',transform=ax.transAxes,ha='center',va='center')
         fig.suptitle(f'Channel {c} · {name} · distribution curves\nNucleus/focus counts label the observed distributions, not biological replicate counts.',fontsize=12)
         figsave(fig,folder,'Distribution_ECDF')
+        advance(progress,f'Channel {c} · distribution curves saved')
         fig,ax=plt.subplots(figsize=(7.5,5),layout='constrained')
         stripbox(ax,image,f'C{c}_percent_focus_positive_nuclei','Focus-positive nuclei (%)',rng,point_alpha=.25)
         treatment_ticks(ax,fontsize=10);ax.set_xlim(-.5,len(GROUPS)-.5);ax.set_ylim(0,110);ax.set_ylabel('Focus-positive nuclei (%)');ax.grid(axis='y',alpha=.2)
         ax.set_title(f'Channel {c} · {name} · focus-positive nuclei\nBoxes: median and IQR; whiskers: within 1.5 × IQR.\nFaint points: individual images; no biological replicates')
         figsave(fig,folder,'Focus_Positive_Nuclei')
+        advance(progress,f'Channel {c} · focus-positive nuclei saved',force=True)
     mapping=pd.read_csv(out/'Methods'/'Treatment_Group_Mapping.csv')
-    make_input_intensity_plots(out/'QC',mapping,p)
+    make_input_intensity_plots(out/'QC',mapping,p,progress=progress)
 
 
 def input_intensity_groups(mapping,c):
@@ -375,7 +393,7 @@ def input_intensity_groups(mapping,c):
         yield f'C{c}_Input_Intensity_Group_{j+1:03d}',g,mapping[mapping.treatment_group==g]
 
 
-def input_intensity_distributions(mapping,c,p):
+def input_intensity_distributions(mapping,c,p,progress=None):
     """Retain only small histogram arrays; read one source image at a time."""
     lower,upper=1.,1.
     records=[]
@@ -388,6 +406,7 @@ def input_intensity_distributions(mapping,c,p):
                         'mean_intensity':float(np.mean(a,dtype=np.float64)),
                         'all_zero':bool(np.all(a==0))})
         del a,positive
+        advance(progress,f'{m.image_id} · Channel {c} · intensity range inspected')
     bins=np.geomspace(lower,upper,130)
     for record,(_,m) in zip(records,mapping.iterrows()):
         a=read_channels(m.source_path,p)[c-1]
@@ -395,14 +414,15 @@ def input_intensity_distributions(mapping,c,p):
         # Normalize by ALL pixels, including the zero mass omitted on a log axis.
         record['density']=counts/(a.size*np.diff(bins))
         del a
+        advance(progress,f'{m.image_id} · Channel {c} · intensity distribution calculated')
     return bins,records
 
 
-def make_input_intensity_plots(qdir,mapping,p):
+def make_input_intensity_plots(qdir,mapping,p,progress=None):
     if mapping.empty:return
     for c in p['foci_channels']:
         print(f'Rendering per-treatment input intensity plots for channel {c}...',flush=True)
-        bins,records=input_intensity_distributions(mapping,c,p)
+        bins,records=input_intensity_distributions(mapping,c,p,progress=progress)
         groups=[]
         for stem,g,fields in input_intensity_groups(mapping,c):
             images=[r for r in records if r['treatment_group']==g]
@@ -440,6 +460,7 @@ def make_input_intensity_plots(qdir,mapping,p):
                 ax.set_xlabel('Raw pixel intensity (ADU)');ax.set_ylabel('Probability density')
                 fig.supxlabel('Each image has equal weight. Zero pixels contribute to normalization and mean,\nbut are omitted from the logarithmic intensity axis.',fontsize=8)
                 figsave(fig,qdir,stem)
+                advance(progress,f'Channel {c} · treatment intensity figure {j+1}/{len(groups)} saved')
             finally:
                 plt.close(fig)
 
@@ -748,12 +769,38 @@ body{font:16px/1.55 system-ui,Arial;color:#203043;background:#f7f9fb;max-width:1
     (out/'Report.md').write_text('\n'.join(lines)+'\n', encoding='utf-8')
 
 
+def output_work_total(mapping,cell,p):
+    """Count the work executed by QC, plotting, summary, and report helpers.
+
+    A PNG/SVG pair is one figure task. Sampling and histogram passes are also
+    counted so source-image preparation reports real progress before rendering.
+    """
+    n=len(mapping);channels=len(p['foci_channels'])
+    pages=math.ceil(n/SHARED_CONTRAST_PAGE_SIZE)
+    groups=len(mapping.treatment_group.unique())
+    work={
+        'preparation_and_records':5,  # setup, QC ranges, summary, methods, reports
+        'annotated_qc':n,
+        'shared_contrast_sampling':n*channels,
+        'shared_contrast_ranges':channels,
+        'shared_contrast_pages':pages*channels,
+        'comparison_figures':7*channels,
+        'intensity_scan_and_histogram':2*n*channels,
+        'treatment_intensity_figures':groups*channels,
+    }
+    if p.get('qc_output','detailed')=='detailed':
+        work['native_overlays']=n*(1+3*channels)
+        work['nucleus_crops']=len(cell)
+    return sum(work.values())
+
+
 def main():
     ap=argparse.ArgumentParser()
     ap.add_argument('--output-dir',type=Path,required=True,help='Analysis folder containing Results, Masks, and Methods')
     ap.add_argument('--qc-output',choices=['minimal','detailed'],default='detailed',
                     help='minimal omits separate native overlays and nucleus crops (default: detailed)')
     add_channel_arguments(ap)
+    add_progress_argument(ap)
     args=ap.parse_args();out=args.output_dir
     mapping=pd.read_csv(out/'Methods'/'Treatment_Group_Mapping.csv');images=pd.read_csv(out/'Results'/'Image_Summary.csv')
     cell=pd.read_csv(out/'Results'/'Cell_Summary.csv');focus=pd.read_csv(out/'Results'/'Focus_Data.csv')
@@ -773,13 +820,18 @@ def main():
     global GROUPS,LABELS,COLORS
     GROUPS=list(mapping.treatment_group.unique());LABELS=[g.replace('ART558_20PDS','ART558 + 20PDS') for g in GROUPS]
     COLORS=[TREATMENT_PALETTE[i%len(TREATMENT_PALETTE)] for i in range(len(GROUPS))]
+    progress=ProgressReporter('outputs',output_work_total(mapping,cell,p),args.progress_json)
+    progress.update(0,'Preparing output generation',force=True)
     (out/'Methods'/'Output_Parameters.json').write_text(json.dumps(p,indent=2), encoding='utf-8')
-    make_qc(out,mapping,cell,focus,p)
-    make_plots(out,cell,focus,images,p)
-    make_experiment_summary(out,mapping,images,cell,focus,p)
+    progress.advance('Output preparation and saved-input checks complete',force=True)
+    make_qc(out,mapping,cell,focus,p,progress=progress)
+    make_plots(out,cell,focus,images,p,progress=progress)
+    make_experiment_summary(out,mapping,images,cell,focus,p,progress=progress)
     print('Writing methods and review reports...',flush=True)
     build_methods(out,p,mapping,images,cell,focus,qc)
+    progress.advance('Methods and data dictionary saved',force=True)
     report(out,mapping,images,cell,focus,qc,p)
+    progress.advance('Review reports saved',force=True)
     print('QC, plots, methods and report complete',flush=True)
 
 

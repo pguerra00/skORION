@@ -7,14 +7,18 @@ import pandas as pd
 import tifffile
 from channel_config import add_channel_arguments, resolve_channels, check_channel_inputs
 from image_io import read_channels
+from progress_reporting import add_progress_argument, ProgressReporter
 
 
 def main():
     ap=argparse.ArgumentParser();ap.add_argument('--output-dir',type=Path,required=True,help='Analysis folder containing Results, Masks, and Methods')
     add_channel_arguments(ap)
+    add_progress_argument(ap)
     args=ap.parse_args();out=args.output_dir
     image=pd.read_csv(out/'Results'/'Image_Summary.csv');cell=pd.read_csv(out/'Results'/'Cell_Summary.csv');focus=pd.read_csv(out/'Results'/'Focus_Data.csv')
     mapping=pd.read_csv(out/'Methods'/'Treatment_Group_Mapping.csv');qc=pd.read_csv(out/'Results'/'QC_Summary.csv')
+    progress=ProgressReporter('validation',len(mapping)+2,args.progress_json)
+    progress.update(0,'Checking saved results',force=True)
     try:
         p=resolve_channels(out,args.nuclear_channel,args.foci_channels)
         check_channel_inputs(out,p,mapping,image,cell,qc)
@@ -38,7 +42,8 @@ def main():
        and not np.isinf(numeric).any().any(),'Numeric focus measurements are finite; undefined ratios may be missing')
     if len(focus):
         ck(((focus.relative_radial_position>=0)&(focus.relative_radial_position<=1)).all(),'Normalized nuclear positions lie in [0,1]')
-    for _,m in mapping.iterrows():
+    progress.advance('Initial consistency checks passed',force=True)
+    for image_index,(_,m) in enumerate(mapping.iterrows(),1):
         im=m.image_id;raw=read_channels(m.source_path,p);nu=tifffile.imread(out/'Masks'/f'{im}_nuclei.tif');cs=cell[cell.image_id==im]
         ck(hashlib.sha256(Path(m.source_path).read_bytes()).hexdigest()==m.sha256,f'{im}: raw SHA256 unchanged')
         ck(nu.shape==raw[nuclear_channel-1].shape,f'{im}: nuclear mask dimensions match channel {nuclear_channel}')
@@ -79,12 +84,14 @@ def main():
             ck(ir[f'C{c}_total_foci']==len(ff)==cs[f'C{c}_foci_count'].sum(),f'{im} C{c}: image total reconciles to nuclei and foci')
             actual=ir[f'C{c}_mean_foci_per_nucleus'];expected=cs[f'C{c}_foci_count'].mean()
             ck((pd.isna(actual) and pd.isna(expected)) or math.isclose(actual,expected,rel_tol=1e-9),f'{im} C{c}: image mean includes zero-focus nuclei')
+        progress.advance(f'Image {image_index}/{len(mapping)} · pixels, masks, and tables reconciled')
     counts={'images':len(image),'nuclei':len(cell),**{f'channel_{c}_foci':int((focus.channel==c).sum()) for c in foci_channels}}
     report={'status':'passed','counts':counts,'checks_passed':len(checks),'checks':checks,
             'nuclear_channel':nuclear_channel,'foci_channels':foci_channels,
             'rgb_channel_order':p.get('rgb_channel_order'),
             'validation_scope':'Independent pixel/mask/table reconciliation for the selected channels; not validation against human focus ground truth.'}
     (out/'Methods'/'Validation_Report.json').write_text(json.dumps(report,indent=2), encoding='utf-8')
+    progress.advance('Validation report saved',force=True)
     print(json.dumps({'status':'passed','counts':counts,'checks_passed':len(checks)},indent=2))
 
 

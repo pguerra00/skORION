@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Desktop analysis workspace. Launch with: python orion_gui.py"""
 import argparse
-import codecs
 from copy import deepcopy
 from datetime import datetime
 import json
@@ -11,8 +10,8 @@ import sys
 import tempfile
 
 try:
-    from PySide6.QtCore import Qt, QProcess, QThread, QTimer, Signal, QUrl
-    from PySide6.QtGui import QColor, QDesktopServices, QIcon, QImage, QPainter, QPixmap
+    from PySide6.QtCore import Qt, QProcess, QSize, QThread, QTimer, Signal, QUrl
+    from PySide6.QtGui import QColor, QDesktopServices, QFontDatabase, QIcon, QImage, QPainter, QPixmap
     from PySide6.QtWidgets import (
         QApplication, QAbstractItemView, QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox,
         QFileDialog, QFormLayout, QGraphicsScene, QGraphicsView, QGridLayout, QGroupBox,
@@ -30,22 +29,15 @@ try:
     from gui_analysis import (FLOOR_KEYS, analyze_preview, default_display_colors, list_images,
                               render_image, validate_parameters, validate_run_paths)
     from image_io import inspect_image
+    from progress_reporting import ProgressStream, RunProgress, STAGE_LABELS
+    from gui_theme import (APP_STYLE, TOKENS, DecoForm, DecoHeader, DecoImageFrame, DecoInspectionDock,
+                           DecoPanel, DecoSurface, apply_theme, button_variant,
+                           layout_metrics, text_label, tracked_font)
 except ImportError as exc:
     raise SystemExit('Analysis dependencies are missing. Using Python 3.12, install '
                      'requirements.txt in your environment: python -m pip install -r requirements.txt') from exc
 
 ROOT = Path(__file__).resolve().parent
-APP_STYLE = '''
-    QWidget { font-size: 13px; }
-    QMainWindow { background: palette(window); }
-    QGroupBox { background: palette(base); border: 1px solid palette(mid);
-                border-radius: 8px; margin-top: 18px; padding: 12px 8px 8px; }
-    QGroupBox::title { subcontrol-origin: margin; left: 10px; font-weight: 600; }
-    QLineEdit, QComboBox, QDoubleSpinBox { padding: 5px; }
-    QPushButton { padding: 6px 10px; }
-    QScrollArea { border: none; }
-    QTabWidget::pane { border: 1px solid palette(mid); }
-'''
 BASIC_KEYS = {'group_names', 'nuclear_channel', 'foci_channels', 'nuclear.fixed_threshold_adu',
               'qc_output', 'rgb_channel_order', 'gui_display'}
 # These strings describe fixed algorithms; editing them would not change execution.
@@ -114,6 +106,7 @@ class ParameterEditor(QTreeWidget):
                     editor.setToolTip(full + (' · method description; read only' if
                         isinstance(editor, QLineEdit) and editor.isReadOnly() else ''))
                     self.setItemWidget(item, 1, editor)
+                    item.setSizeHint(1, QSize(0, editor.sizeHint().height() + TOKENS.gap))
                     self.editors[path] = (editor, value)
         add(parameters)
 
@@ -142,13 +135,36 @@ class ImageView(QGraphicsView):
     def __init__(self):
         super().__init__()
         self.setScene(QGraphicsScene(self))
-        self.setBackgroundBrush(QColor('#080f1d'))
+        self.setBackgroundBrush(QColor(TOKENS.image_background))
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
-        self.setMinimumSize(300, 300)
+        self.setMinimumSize(240, 200)
         self.setAccessibleName('Image viewer: wheel to zoom, drag to pan, click to inspect a nucleus')
         self.pixmap = None
         self.press_point = None
+
+    def drawForeground(self, painter, rect):
+        if self.pixmap is not None:
+            return
+        painter.save()
+        painter.resetTransform()
+        bounds = self.viewport().rect()
+        painter.setPen(QColor(TOKENS.gold))
+        font = self.font()
+        font.setFamily(TOKENS.heading_font)
+        font.setPixelSize(20)
+        painter.setFont(font)
+        painter.drawText(bounds.adjusted(12, -16, -12, -16), Qt.AlignmentFlag.AlignCenter,
+                         'YOUR FIELD OF VIEW')
+        font.setFamily(TOKENS.body_font)
+        font.setPixelSize(13)
+        painter.setFont(font)
+        painter.setPen(QColor(TOKENS.muted))
+        painter.drawText(bounds.adjusted(12, 35, -12, 35), Qt.AlignmentFlag.AlignCenter,
+                         'Load TIFF images to begin')
+        painter.restore()
 
     def show_rgb(self, rgb, metadata, fit=False):
         h, w = rgb.shape[:2]
@@ -215,8 +231,9 @@ class PreviewWorker(QThread):
 
 class OrionWindow(QMainWindow):
     def __init__(self, parameter_file=None, input_dir=None, output_dir=None):
+        apply_theme(QApplication.instance())
         super().__init__()
-        self.setWindowTitle('scikitORION · Nuclear & foci analysis')
+        self.setWindowTitle(' · scikitORION · ')
         self.resize(1320, 950)
         self.parameters = json.loads((ROOT / 'parameters.template.json').read_text(encoding='utf-8'))
         self.parameters.setdefault('rgb_channel_order', None)
@@ -236,7 +253,10 @@ class OrionWindow(QMainWindow):
         self.process.readyReadStandardOutput.connect(self.read_process_output)
         self.process.finished.connect(self.process_finished)
         self.process.errorOccurred.connect(self.process_error)
-        self.decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
+        self.process_stream = ProgressStream()
+        self.run_progress = None
+        self.progress_detail = ''
+        self.preview_error = False
         self.cancel_requested = False
         self.stage = ''
         self.build_ui()
@@ -251,24 +271,27 @@ class OrionWindow(QMainWindow):
             self.output_dir.setText(str(Path(output_dir).expanduser().resolve()))
 
     def build_ui(self):
+        shell = DecoSurface()
+        shell_layout = layout_metrics(QVBoxLayout(shell), margin=0, spacing=0)
+        shell_layout.addWidget(DecoHeader())
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.setCentralWidget(splitter)
+        splitter.setChildrenCollapsible(False)
+        splitter.setHandleWidth(1)
+        shell_layout.addWidget(splitter, 1)
+        self.setCentralWidget(shell)
         left = QWidget()
-        left_layout = QVBoxLayout(left)
+        left.setObjectName('setupColumn')
+        left_layout = layout_metrics(QVBoxLayout(left))
         self.sidebar = QWidget()
-        setup = QVBoxLayout(self.sidebar)
-        title = QLabel('scikitORION')
-        title.setStyleSheet('font-size: 23px; font-weight: 600;')
-        setup.addWidget(title)
-        setup.addWidget(QLabel('Nuclear & foci analysis'))
-        directories = QGroupBox('Analysis directories')
-        paths = QFormLayout(directories)
-        paths.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
+        self.sidebar.setObjectName('setupFields')
+        setup = layout_metrics(QVBoxLayout(self.sidebar), margin=0, spacing=TOKENS.space)
+        directories = DecoPanel('I · Directories')
+        paths = DecoForm(directories)
         self.input_dir = self.path_field(paths, 'Input directory', '')
-        default_output = ROOT / 'Analyses' / datetime.now().strftime('%Y-%m-%d_%H%M%S_analysis')
+        default_output = self.input_dir.text() or Path.home()
         self.output_dir = self.path_field(paths, 'Output directory', str(default_output))
-        self.parameter_dir = self.path_field(paths, 'Parameters directory', str(ROOT))
-        self.parameter_name = QLineEdit('parameters.template.json')
+        self.parameter_dir = self.path_field(paths, 'Parameters directory', self.input_dir.text() or str(default_output))
+        self.parameter_name = QLineEdit('parameters.json')
         paths.addRow('Parameter file', self.parameter_name)
         self.parameter_name.setAccessibleName('Parameter file name')
         parameter_buttons = QHBoxLayout()
@@ -277,20 +300,20 @@ class OrionWindow(QMainWindow):
         paths.addRow(parameter_buttons)
         self.add_button(paths, 'Load images', self.load_images)
         setup.addWidget(directories)
-        basic = QGroupBox('Basic parameters')
-        form = QFormLayout(basic)
-        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
+        basic = DecoPanel('II · Basic parameters')
+        form = DecoForm(basic)
         self.groups = QLineEdit()
         self.groups.setPlaceholderText('Control, Treatment')
         form.addRow('Group names', self.groups)
         self.groups.textEdited.connect(self.invalidate_preview)
-        group_help = QLabel('Comma-separated names matched to filenames. Leave blank to use the existing filename parser.')
-        group_help.setWordWrap(True)
+        group_help = text_label('Comma-separated names matched to filenames. Leave blank to use the existing filename parser.')
         form.addRow(group_help)
         self.rgb_enabled = QCheckBox('Map RGB TIFF colors to channels')
+        self.rgb_enabled.setAccessibleName('Enable RGB TIFF channel mapping')
+        self.rgb_enabled.setToolTip('Required only for RGB TIFF exports. Channel stacks keep their original channel order.')
         form.addRow(self.rgb_enabled)
         self.rgb_container = QWidget()
-        rgb_form = QFormLayout(self.rgb_container)
+        rgb_form = DecoForm(self.rgb_container)
         rgb_form.setContentsMargins(0, 0, 0, 0)
         self.rgb_colors = []
         for channel in range(1, 4):
@@ -302,13 +325,12 @@ class OrionWindow(QMainWindow):
             color.currentIndexChanged.connect(self.rgb_changed)
             rgb_form.addRow(f'Channel {channel}', color)
             self.rgb_colors.append(color)
-        form.addRow(self.rgb_container)
-        rgb_help = QLabel('For RGB exports, assign red, green, and blue once each. '
-                          'Then choose the nuclear and foci channels below. '
+        self.rgb_help = text_label('For RGB exports, assign red, green, and blue once each. '
+                          'Choose nuclear and foci roles independently. '
                           'For example: Channel 1 = Blue, Channel 2 = Green, Channel 3 = Red. '
                           'Channel stacks use their original channel order.')
-        rgb_help.setWordWrap(True)
-        form.addRow(rgb_help)
+        form.addRow(self.rgb_container)
+        form.addRow(self.rgb_help)
         self.rgb_enabled.toggled.connect(self.rgb_changed)
         self.nuclear = QComboBox()
         self.nuclear.currentIndexChanged.connect(self.channel_changed)
@@ -339,15 +361,15 @@ class OrionWindow(QMainWindow):
         self.floor_layout = QVBoxLayout(self.floor_container)
         self.floor_layout.setContentsMargins(0, 0, 0, 0)
         form.addRow(self.floor_container)
-        floors_help = QLabel('ADU floors are stored per channel. New channels start at 0 ADU; noise-based thresholds still apply.')
-        floors_help.setWordWrap(True)
+        floors_help = text_label('ADU floors are stored per channel. New channels start at 0 ADU; noise-based thresholds still apply.')
         form.addRow(floors_help)
         self.qc_mode = QComboBox()
         self.qc_mode.addItems(['minimal', 'detailed', 'off'])
         form.addRow('QC output', self.qc_mode)
         setup.addWidget(basic)
         self.advanced_toggle = QToolButton()
-        self.advanced_toggle.setText('Advanced parameters')
+        self.advanced_toggle.setText('III · Advanced parameters')
+        self.advanced_toggle.setAccessibleName('Advanced parameters')
         self.advanced_toggle.setCheckable(True)
         self.advanced_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.advanced_toggle.setArrowType(Qt.ArrowType.RightArrow)
@@ -363,64 +385,90 @@ class OrionWindow(QMainWindow):
         scroll.setWidget(self.sidebar)
         scroll.setMinimumWidth(340)
         left_layout.addWidget(scroll)
-        actions = QHBoxLayout()
-        self.preview_button = self.add_button(actions, 'Preview image', self.start_preview)
-        self.run_button = self.add_button(actions, 'Run analysis', self.start_analysis)
-        self.stop_button = self.add_button(actions, 'Stop', self.stop_analysis)
+        actions = QGridLayout()
+        actions.setSpacing(TOKENS.gap)
+        self.run_button = button_variant(QPushButton('Run analysis'), 'primary')
+        self.run_button.clicked.connect(self.start_analysis)
+        self.stop_button = button_variant(QPushButton('Stop'), 'quiet')
+        self.stop_button.clicked.connect(self.stop_analysis)
+        self.preview_button = button_variant(QPushButton('Preview image'))
+        self.preview_button.clicked.connect(self.start_preview)
+        actions.addWidget(self.run_button, 0, 0)
+        actions.addWidget(self.stop_button, 0, 1)
+        actions.addWidget(self.preview_button, 1, 0, 1, 2)
+        actions.setColumnStretch(0, 1)
         self.stop_button.setEnabled(False)
         left_layout.addLayout(actions)
         splitter.addWidget(left)
-        workspace = QWidget()
-        layout = QVBoxLayout(workspace)
+        workspace = DecoSurface(patterned=True)
+        layout = layout_metrics(QVBoxLayout(workspace))
+        workspace_title = QHBoxLayout()
+        workspace_title.addWidget(text_label('Observation room', 'heading'))
+        workspace_title.addStretch()
+        self.image_info = text_label('Load TIFF images to begin', 'metadata')
+        self.image_info.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        workspace_title.addWidget(self.image_info)
+        layout.addLayout(workspace_title)
         image_row = QHBoxLayout()
-        image_row.addWidget(QLabel('Image'))
+        image_label = text_label('Image', 'fieldLabel')
+        image_row.addWidget(image_label)
         self.image_picker = QComboBox()
         self.image_picker.setMinimumWidth(150)
         self.image_picker.currentIndexChanged.connect(self.image_changed)
+        image_label.setBuddy(self.image_picker)
         image_row.addWidget(self.image_picker, 1)
-        self.image_info = QLabel('Load TIFF images to begin')
-        image_row.addWidget(self.image_info)
+        button_variant(self.add_button(image_row, '−', lambda: self.viewer.scale(1 / 1.25, 1 / 1.25)), 'tool').setAccessibleName('Zoom out')
+        button_variant(self.add_button(image_row, 'Fit', lambda: self.viewer.fit()), 'tool')
+        button_variant(self.add_button(image_row, '+', lambda: self.viewer.scale(1.25, 1.25)), 'tool').setAccessibleName('Zoom in')
         layout.addLayout(image_row)
         self.view_tabs = QTabBar()
         for name in ('Raw image', 'Nuclei', 'Foci', 'Overlay'):
             self.view_tabs.addTab(name)
         self.view_tabs.setCurrentIndex(3)
         self.view_tabs.setAccessibleName('Image view tabs')
+        self.view_tabs.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        tracked_font(self.view_tabs, .7)
         self.view_tabs.currentChanged.connect(self.draw)
         layout.addWidget(self.view_tabs)
-        view_row = QHBoxLayout()
-        view_row.addWidget(QLabel('Display channel'))
+        self.raw_controls = QWidget()
+        view_row = layout_metrics(QHBoxLayout(self.raw_controls), margin=0)
+        raw_label = text_label('Display channel', 'fieldLabel')
+        view_row.addWidget(raw_label)
         self.raw_channel = QComboBox()
         self.raw_channel.setAccessibleName('Display channel')
         self.raw_channel.setEnabled(False)
         self.raw_channel.currentIndexChanged.connect(self.draw)
+        raw_label.setBuddy(self.raw_channel)
         view_row.addWidget(self.raw_channel)
         view_row.addStretch()
-        self.add_button(view_row, '−', lambda: self.viewer.scale(1 / 1.25, 1 / 1.25)).setAccessibleName('Zoom out')
-        self.add_button(view_row, 'Fit', lambda: self.viewer.fit())
-        self.add_button(view_row, '+', lambda: self.viewer.scale(1.25, 1.25)).setAccessibleName('Zoom in')
-        layout.addLayout(view_row)
+        self.raw_controls.hide()
+        layout.addWidget(self.raw_controls)
         self.viewer = ImageView()
         self.viewer.picked.connect(self.pick_nucleus)
-        layout.addWidget(self.viewer, 1)
+        layout.addWidget(DecoImageFrame(self.viewer), 1)
         self.layers = QWidget()
         self.layers_layout = QHBoxLayout(self.layers)
         self.layers_layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self.layers)
         self.colors_toggle = QToolButton()
         self.colors_toggle.setText('Channel colors')
         self.colors_toggle.setCheckable(True)
         self.colors_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.colors_toggle.setArrowType(Qt.ArrowType.RightArrow)
-        layout.addWidget(self.colors_toggle)
+        layer_row = QHBoxLayout()
+        layer_row.addWidget(self.layers, 1)
+        layer_row.addWidget(self.colors_toggle)
+        layout.addLayout(layer_row)
         self.colors_panel = QWidget()
         self.colors_layout = QGridLayout(self.colors_panel)
         self.colors_layout.setContentsMargins(0, 0, 0, 0)
         self.colors_panel.hide()
         self.colors_toggle.toggled.connect(self.toggle_colors)
-        layout.addWidget(self.colors_panel)
+        dock = QWidget()
+        dock_layout = layout_metrics(QVBoxLayout(dock), margin=0)
+        dock_layout.addWidget(self.colors_panel)
+        self.inspection_dock = DecoInspectionDock(dock)
         self.tabs = QTabWidget()
-        self.tabs.setMaximumHeight(300)
+        self.tabs.setMaximumHeight(200)
         self.inspector = QWidget()
         inspection = QVBoxLayout(self.inspector)
         picker = QHBoxLayout()
@@ -443,31 +491,61 @@ class OrionWindow(QMainWindow):
         self.table = QTableWidget()
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setAlternatingRowColors(True)
+        self.table.setShowGrid(False)
         result_layout.addWidget(self.table)
         self.tabs.addTab(results, 'Results')
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
+        self.log.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont))
         self.log.setMaximumBlockCount(10000)
         self.tabs.addTab(self.log, 'Analysis log')
-        layout.addWidget(self.tabs)
+        dock_layout.addWidget(self.tabs)
+        layout.addWidget(self.inspection_dock)
         bottom = QHBoxLayout()
+        progress_rows = QVBoxLayout()
+        progress_rows.setSpacing(4)
         self.progress = QProgressBar()
-        self.progress.setRange(0, 1)
-        self.progress.setValue(0)
-        bottom.addWidget(self.progress, 1)
-        self.add_button(bottom, 'Load saved results', self.load_saved_results)
-        self.report_button = self.add_button(bottom, 'Open report', self.open_report)
+        self.stage_progress = QProgressBar()
+        self.overall_label = text_label('Overall', 'metadata')
+        self.stage_label = text_label('Current stage', 'metadata')
+        self.overall_percent = text_label('0%', 'metadata')
+        self.stage_percent = text_label('0%', 'metadata')
+        for bar, name, value in [(self.progress, self.overall_label, self.overall_percent),
+                                 (self.stage_progress, self.stage_label, self.stage_percent)]:
+            row = QHBoxLayout()
+            row.setSpacing(TOKENS.gap)
+            name.setWordWrap(False)
+            name.setFixedWidth(112)
+            value.setWordWrap(False)
+            value.setFixedWidth(36)
+            value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            bar.setRange(0, 100)
+            bar.setProperty('variant', 'compact')
+            bar.setValue(0)
+            bar.setTextVisible(False)
+            bar.setFixedHeight(6)
+            bar.setMinimumWidth(60)
+            row.addWidget(name)
+            row.addWidget(bar, 1)
+            row.addWidget(value)
+            progress_rows.addLayout(row)
+        self.progress.setAccessibleName('Overall analysis progress')
+        self.stage_progress.setAccessibleName('Current stage progress')
+        bottom.addLayout(progress_rows, 1)
+        button_variant(self.add_button(bottom, 'Load saved results', self.load_saved_results), 'quiet')
+        self.report_button = button_variant(self.add_button(bottom, 'Open report', self.open_report), 'quiet')
         self.report_button.setEnabled(False)
         layout.addLayout(bottom)
         splitter.addWidget(workspace)
-        splitter.setSizes([390, 930])
+        splitter.setSizes([360, 960])
         splitter.setStretchFactor(1, 1)
         self.statusBar().showMessage('Ready · previews do not write output files')
         self.input_dir.textChanged.connect(self.input_changed)
 
     @staticmethod
     def add_button(layout, text, callback):
-        button = QPushButton(text)
+        button = button_variant(QPushButton(text))
         button.clicked.connect(callback)
         if isinstance(layout, QFormLayout):
             layout.addRow(button)
@@ -482,9 +560,13 @@ class OrionWindow(QMainWindow):
         field.setMinimumWidth(120)
         row.addWidget(field, 1)
         browse = self.add_button(row, '…', lambda: self.browse_directory(field))
-        browse.setFixedWidth(32)
+        button_variant(browse, 'icon')
+        browse.setText('')
+        browse.setIcon(QIcon(str(ROOT / 'assets/icons/folder.svg')))
+        browse.setFixedWidth(44)
         browse.setAccessibleName('Browse ' + text.lower())
         form.addRow(text, row)
+        form.labelForField(row).setBuddy(field)
         return field
 
     @staticmethod
@@ -532,7 +614,7 @@ class OrionWindow(QMainWindow):
             color.blockSignals(True)
             color.setCurrentIndex(color.findData(order[index] if order else None))
             color.blockSignals(False)
-        self.rgb_container.setEnabled(order is not None)
+        self.sync_rgb_controls()
         bounds = p['nuclear'].get('fixed_threshold_adu')
         self.threshold.blockSignals(True)
         self.threshold.setCurrentIndex(0 if bounds is None else 1)
@@ -566,8 +648,8 @@ class OrionWindow(QMainWindow):
             check.toggled.connect(self.channel_changed)
             self.foci_layout.addWidget(check)
             self.foci_checks[channel] = check
-            box = QGroupBox(f'Channel {channel} · foci ADU floors')
-            form = QFormLayout(box)
+            box = DecoPanel(f'Channel {channel} · foci ADU floors')
+            form = DecoForm(box)
             values = p['foci'].get(f'channel_{channel}', {})
             controls = {}
             for key in FLOOR_KEYS:
@@ -613,22 +695,23 @@ class OrionWindow(QMainWindow):
             self.outline_colors.setdefault(channel, QColor(*outline).name())
             self.colors_layout.addWidget(QLabel(f'Channel {channel}'), channel, 0)
             for column, kind in enumerate(('signal', 'outline'), start=1):
-                button = QPushButton()
+                button = button_variant(QPushButton(), 'color')
                 button.setAccessibleName(f'Channel {channel} {kind} color')
                 button.clicked.connect(lambda _=False, c=channel, k=kind: self.choose_display_color(c, k))
                 self.colors_layout.addWidget(button, channel, column)
                 self.color_buttons[channel, kind] = button
                 self.update_color_button(channel, kind)
-        reset = QPushButton('Reset colors')
+        reset = button_variant(QPushButton('Reset colors'), 'quiet')
         reset.clicked.connect(self.reset_display_colors)
         self.colors_layout.addWidget(reset, len(self.foci_checks) + 1, 0)
-        help_text = QLabel('Display only · colors stay with their channel and are saved with Save JSON…')
-        help_text.setWordWrap(True)
+        help_text = text_label('Display only · colors stay with their channel and are saved with Save JSON…')
         self.colors_layout.addWidget(help_text, len(self.foci_checks) + 1, 1, 1, 2)
 
     def toggle_colors(self, checked):
         self.colors_panel.setVisible(checked)
         self.colors_toggle.setArrowType(Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow)
+        if checked:
+            self.inspection_dock.verticalScrollBar().setValue(0)
 
     def update_color_button(self, channel, kind):
         palette = self.signal_colors if kind == 'signal' else self.outline_colors
@@ -667,13 +750,35 @@ class OrionWindow(QMainWindow):
         self.invalidate_preview()
 
     def rgb_changed(self, *_):
-        self.rgb_container.setEnabled(self.rgb_enabled.isChecked())
+        self.sync_rgb_controls()
         # A color reassignment changes the source pixels for each channel.
         self.pixels, self.metadata = None, None
         self.viewer.scene().clear()
         self.viewer.pixmap = None
         self.invalidate_preview()
         self.statusBar().showMessage('RGB mapping changed · preview again to reload channel pixels')
+
+    def sync_rgb_controls(self):
+        enabled = self.rgb_enabled.isChecked()
+        self.rgb_container.setEnabled(enabled)
+        self.rgb_container.setVisible(enabled)
+        self.rgb_help.setVisible(enabled)
+
+    def prepare_input_parameters(self, paths):
+        """Enable color mapping only when this input batch contains RGB exports.
+
+        The temporary order is used for metadata inspection only. It never
+        becomes a scientific channel assignment or reads/reorders image pixels.
+        A user's saved color choices remain available when the mapping is off.
+        """
+        metadata = [inspect_image(path, {'rgb_channel_order': ['red', 'green', 'blue']},
+                                  require_calibration=False) for path in paths]
+        first_rgb = next((path for path, md in zip(paths, metadata)
+                          if md['input_format'] == 'rgb_export'), None)
+        self.rgb_enabled.setChecked(first_rgb is not None)
+        if first_rgb is not None and set(color.currentData() for color in self.rgb_colors) != {'red', 'green', 'blue'}:
+            self.inspect_input(first_rgb, {'rgb_channel_order': None})
+        return self.collect_parameters(), metadata[0]
 
     def inspect_input(self, path, parameters):
         # A temporary order permits metadata inspection only; no pixels are
@@ -816,9 +921,8 @@ class OrionWindow(QMainWindow):
         try:
             if not self.input_dir.text().strip():
                 raise ValueError('Choose an input directory first.')
-            p = self.collect_parameters()
             paths = list_images(self.input_dir.text())
-            md = self.inspect_input(paths[0], p)
+            p, md = self.prepare_input_parameters(paths)
             self.parameters = p
             self.images = paths
             self.build_channels(max(md['shape'][0], len(self.foci_checks)))
@@ -873,8 +977,19 @@ class OrionWindow(QMainWindow):
         self.preview_button.setEnabled(not busy)
         self.run_button.setEnabled(not busy)
         self.stop_button.setEnabled(busy and processing)
-        self.progress.setRange(0, 0 if busy else 1)
-        self.progress.setValue(0)
+
+    def update_run_progress(self):
+        if self.run_progress is None:
+            return
+        self.progress.setRange(0, 100)
+        self.stage_progress.setRange(0, 100)
+        self.progress.setValue(self.run_progress.overall_percent)
+        self.stage_progress.setValue(self.run_progress.stage_percent)
+        self.overall_percent.setText(f'{self.progress.value()}%')
+        self.stage_percent.setText(f'{self.stage_progress.value()}%')
+        name = STAGE_LABELS[self.run_progress.stage]
+        self.stage_label.setText(name)
+        self.stage_progress.setAccessibleName(f'{name} progress')
 
     def start_preview(self):
         if self.busy:
@@ -883,16 +998,24 @@ class OrionWindow(QMainWindow):
             self.load_images()
             return
         try:
-            p = self.collect_parameters()
             index = self.image_picker.currentIndex()
             if not 0 <= index < len(self.images):
                 raise ValueError('Choose an image to preview.')
-            self.inspect_input(self.images[index], p)
+            p, _ = self.prepare_input_parameters(self.images)
+            self.run_progress = None
+            self.preview_error = False
+            self.progress.setRange(0, 100)
+            self.progress.setValue(0)
+            self.overall_percent.setText('—')
+            self.stage_label.setText('Previewing image')
+            self.stage_progress.setAccessibleName('Image preview progress')
+            self.stage_progress.setRange(0, 0)
+            self.stage_percent.setText('—')
             self.set_busy(True)
             self.statusBar().showMessage(f'Previewing {self.images[index].name}…')
             self.worker = PreviewWorker(self.images[index], p)
             self.worker.completed.connect(self.preview_complete)
-            self.worker.failed.connect(self.show_error)
+            self.worker.failed.connect(self.preview_failed)
             self.worker.finished.connect(self.preview_finished)
             self.worker.start()
         except (OSError, ValueError, KeyError, TypeError) as exc:
@@ -900,8 +1023,16 @@ class OrionWindow(QMainWindow):
 
     def preview_finished(self):
         self.set_busy(False)
+        self.stage_progress.setRange(0, 100)
+        self.stage_progress.setValue(0 if self.preview_error else 100)
+        self.stage_percent.setText('0%' if self.preview_error else '100%')
+        self.stage_label.setText('Preview failed' if self.preview_error else 'Preview complete')
         self.worker.deleteLater()
         self.worker = None
+
+    def preview_failed(self, message):
+        self.preview_error = True
+        self.show_error(message)
 
     def preview_complete(self, preview):
         self.preview = preview
@@ -929,6 +1060,7 @@ class OrionWindow(QMainWindow):
     def draw(self, *_, fit=False):
         mode = self.view_tabs.tabText(self.view_tabs.currentIndex())
         self.raw_channel.setEnabled(mode == 'Raw image')
+        self.raw_controls.setVisible(mode == 'Raw image')
         if self.pixels is None:
             return
         # A previous image may have fewer channels than newly chosen controls.
@@ -1006,25 +1138,26 @@ class OrionWindow(QMainWindow):
         self.statusBar().showMessage(message)
         self.log.appendPlainText('Error: ' + message)
         self.tabs.setCurrentWidget(self.log)
+        self.inspection_dock.ensureWidgetVisible(self.tabs)
         QMessageBox.warning(self, 'scikitORION', message)
 
     def start_analysis(self):
         if self.busy:
             return
         try:
-            p = self.collect_parameters()
             if not self.input_dir.text().strip() or not self.output_dir.text().strip():
                 raise ValueError('Choose input and output directories.')
             paths = list_images(self.input_dir.text())
             source, output = validate_run_paths(self.input_dir.text(), self.output_dir.text())
-            for path in paths:
-                self.inspect_input(path, p)
+            p, _ = self.prepare_input_parameters(paths)
             self.run_temp = tempfile.TemporaryDirectory(prefix='orion-gui-')
             snapshot = Path(self.run_temp.name) / 'parameters.json'
             snapshot.write_text(json.dumps(p, indent=2, allow_nan=False), encoding='utf-8')
             self.run_output = output
             self.run_parameters = deepcopy(p)
             self.cancel_requested = False
+            self.run_progress = RunProgress(outputs=p['qc_output'] != 'off')
+            self.update_run_progress()
             self.set_busy(True, processing=True)
             self.tabs.setCurrentWidget(self.log)
             self.log.appendPlainText(f'Analyzing {len(paths)} image(s)\nOutput: {output}\n'
@@ -1041,26 +1174,40 @@ class OrionWindow(QMainWindow):
             self.show_error(str(exc))
 
     def start_process(self, script, args):
-        self.decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
+        self.process_stream = ProgressStream()
+        self.progress_detail = ''
+        self.run_progress.begin(self.stage)
+        self.update_run_progress()
         self.process.setWorkingDirectory(str(ROOT))
-        self.process.start(sys.executable, ['-X', 'utf8', '-u', str(ROOT / script), *args])
+        self.process.start(sys.executable, ['-X', 'utf8', '-u', str(ROOT / script), *args, '--progress-json'])
         self.statusBar().showMessage({'analysis': 'Analyzing images…', 'outputs': 'Generating QC and reports…',
                                      'validation': 'Validating saved results…'}[self.stage])
 
     def read_process_output(self):
-        text = self.decoder.decode(bytes(self.process.readAllStandardOutput()))
-        self.log.moveCursor(self.log.textCursor().MoveOperation.End)
-        self.log.insertPlainText(text)
-        self.log.ensureCursorVisible()
-        lines = [line for line in text.splitlines() if line.strip()]
-        if lines:
-            self.statusBar().showMessage(lines[-1])
+        self.consume_process_output(self.process_stream.feed(bytes(self.process.readAllStandardOutput())))
+
+    def consume_process_output(self, records):
+        ordinary = []
+        for record, line in records:
+            if record is None:
+                ordinary.append(line)
+            elif (self.run_progress is not None and not self.cancel_requested
+                  and self.run_progress.accept(record)):
+                self.progress_detail = record['detail']
+                self.update_run_progress()
+                self.stage_progress.setAccessibleDescription(self.progress_detail)
+                self.statusBar().showMessage(self.progress_detail)
+        if ordinary:
+            self.log.moveCursor(self.log.textCursor().MoveOperation.End)
+            self.log.insertPlainText(''.join(ordinary))
+            self.log.ensureCursorVisible()
+            lines = [line.strip() for line in ordinary if line.strip()]
+            if lines and not self.progress_detail and not self.cancel_requested:
+                self.statusBar().showMessage(lines[-1])
 
     def process_finished(self, code, exit_status):
         self.read_process_output()
-        tail = self.decoder.decode(b'', final=True)
-        if tail:
-            self.log.insertPlainText(tail)
+        self.consume_process_output(self.process_stream.feed(final=True))
         if self.cancel_requested:
             self.log.appendPlainText('Analysis stopped. Partial files may remain in the output directory.')
             self.finish_run(False)
@@ -1068,17 +1215,20 @@ class OrionWindow(QMainWindow):
         elif code != 0 or exit_status != QProcess.ExitStatus.NormalExit:
             self.finish_run(False)
             self.show_error(f'{self.stage.capitalize()} failed (exit {code}). See the analysis log. Completed files are preserved.')
-        elif self.stage == 'analysis' and self.run_parameters['qc_output'] != 'off':
-            self.stage = 'outputs'
-            self.start_process('make_outputs.py', ['--output-dir', str(self.run_output),
-                                                  '--qc-output', self.run_parameters['qc_output']])
-        elif self.stage in ('analysis', 'outputs'):
-            self.stage = 'validation'
-            self.start_process('validate_results.py', ['--output-dir', str(self.run_output)])
         else:
-            self.finish_run(True)
-            self.load_saved_results(self.run_output)
-            self.statusBar().showMessage(f'Analysis complete and validated · {self.run_output}')
+            self.run_progress.complete_stage()
+            self.update_run_progress()
+            if self.stage == 'analysis' and self.run_parameters['qc_output'] != 'off':
+                self.stage = 'outputs'
+                self.start_process('make_outputs.py', ['--output-dir', str(self.run_output),
+                                                      '--qc-output', self.run_parameters['qc_output']])
+            elif self.stage in ('analysis', 'outputs'):
+                self.stage = 'validation'
+                self.start_process('validate_results.py', ['--output-dir', str(self.run_output)])
+            else:
+                self.finish_run(True)
+                self.load_saved_results(self.run_output)
+                self.statusBar().showMessage(f'Analysis complete and validated · {self.run_output}')
 
     def process_error(self, error):
         if error == QProcess.ProcessError.FailedToStart:
@@ -1087,7 +1237,9 @@ class OrionWindow(QMainWindow):
 
     def finish_run(self, success):
         self.set_busy(False)
-        self.progress.setValue(1 if success else 0)
+        if self.run_progress is not None and self.run_progress.active:
+            self.run_progress.finish(success)
+            self.update_run_progress()
         if self.run_temp:
             self.run_temp.cleanup()
             self.run_temp = None
@@ -1098,6 +1250,7 @@ class OrionWindow(QMainWindow):
         if not self.busy or self.process.state() == QProcess.ProcessState.NotRunning:
             return
         self.cancel_requested = True
+        self.statusBar().showMessage(f'Stopping · {STAGE_LABELS.get(self.stage, self.stage)}')
         self.stop_button.setEnabled(False)
         self.process.terminate()
         QTimer.singleShot(2000, self.kill_cancelled_process)
@@ -1142,7 +1295,7 @@ def main():
     args = parser.parse_args()
     app = QApplication(sys.argv[:1])
     app.setApplicationName('scikitORION')
-    app.setStyleSheet(APP_STYLE)
+    apply_theme(app)
     window = OrionWindow(args.parameters, args.input_dir, args.output_dir)
     window.show()
     return app.exec()

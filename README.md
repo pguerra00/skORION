@@ -58,7 +58,7 @@ workspace. The generated output records the script version and effective
 parameters used for that run.
 
 Keep `analyze_foci.py`, `make_outputs.py`, `validate_results.py`,
-`channel_config.py`, and `image_io.py` together. You can copy this folder's contents into your
+`channel_config.py`, `image_io.py`, and `progress_reporting.py` together. You can copy this folder's contents into your
 working directory. No installation as a Python package is required; install
 the dependencies in `requirements.txt` in your Python environment.
 
@@ -198,6 +198,14 @@ On macOS, after this setup, double-click `launch_gui.command` to open the GUI.
 On Windows, double-click `launch_gui.bat` after running `setup_windows.bat`.
 You can also start with `--input-dir`, `--output-dir`, and `--parameters` options.
 
+The **Studio** workspace uses the approved Art Deco design: obsidian surfaces,
+gold geometric frames, Marcellus headings, and Josefin Sans controls. Fonts and
+their licenses are bundled for offline use. Shared presentation tokens and Qt
+components live in `gui_theme.py`; the compact panel spacing is 12 px. The image
+viewer keeps its own colors and calibrated pixels. The setup sidebar and lower
+inspection dock scroll independently so expanded settings and color controls
+remain usable in smaller desktop windows.
+
 1. Enter or browse to an input directory, an output directory, and a parameters
    directory. **Load JSON** reads the named experiment file; **Save JSON…** saves
    your edited configuration separately. The bundled template is loaded initially.
@@ -208,8 +216,12 @@ You can also start with `--input-dir`, `--output-dir`, and `--parameters` option
    floors belong to their physical channel and appear for each selected channel.
    A newly configured channel starts with zero floors, so noise thresholds apply
    until you enter experiment-specific floors. Review these settings before a run.
-   For RGB TIFF exports, enable **Map RGB TIFF colors to channels** in Basic
-   parameters and choose a color for Channels 1, 2, and 3, using red, green, and
+   **Map RGB TIFF colors to channels** is an explicit toggle, off by default.
+   Its color selectors appear only while enabled. Loading or running a batch
+   enables mapping if any input is an RGB TIFF export; batches containing only
+   channel stacks turn it off. Saved color choices are remembered, but no
+   color assignment is inferred from the nuclear/foci roles. For RGB inputs,
+   choose a color for Channels 1, 2, and 3, using red, green, and
    blue once each. For blue nuclei, green Channel 2, and red Channel 3, choose
    Blue / Green / Red and nuclear Channel 1. Other assignments are equally valid;
    nuclear and foci roles are selected separately. This mapping is saved as
@@ -251,6 +263,22 @@ QC detail. **Results** displays cell measurements (up to 2,000 rows; full tables
 remain in CSV). **Load saved results** reads the output directory's saved table,
 and **Open report** opens its generated review in your browser. Saving parameters
 is always an explicit action.
+
+The bottom indicators show **Overall** progress and the **current stage**:
+generating masks, making outputs, or validating results. Percentages advance
+when work finishes, including nuclei, channel masks, figures, and saved reports;
+they are not estimates of elapsed or remaining time. Overall progress weights
+analysis/masks at 45%, outputs at 50%, and validation at 5%. With QC output off,
+the weights become 90% analysis and 10% validation. Overall reaches 100% only
+after all required processes succeed. Stopping or failing retains the last
+percentages; a new run resets them. A single-image preview shows **—** for
+overall progress and an indeterminate preview indicator while it runs.
+
+For programmatic monitoring, the analysis, output, and validation scripts accept
+`--progress-json`. It adds flushed lines starting with `ORION_PROGRESS ` followed
+by JSON containing `stage`, `completed`, `total`, and `detail`. Normal command-line
+logging is unchanged when this option is absent. Progress is not written into
+scientific result tables or parameter files.
 
 This first desktop version launches from Python; it is not yet packaged as a
 standalone installer. The original command-line workflow remains available.

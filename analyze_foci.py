@@ -21,6 +21,7 @@ import skimage
 from skimage import measure, morphology, segmentation
 import tifffile
 from image_io import read_image, inspect_image, validate_rgb_channel_order, validate_pixel_size
+from progress_reporting import add_progress_argument, ProgressReporter
 
 
 def mad(a):
@@ -383,6 +384,7 @@ def select_channels(p,nuclear_channel=None,foci_channels=None):
 
 def main():
     ap=argparse.ArgumentParser()
+    add_progress_argument(ap)
     ap.add_argument('--input-dir',type=Path,required=True,help='Folder containing raw .tif or .tiff images (case-insensitive)')
     ap.add_argument('--output-dir',type=Path,help='Analysis folder; default: a new dated folder under ./Analyses/')
     ap.add_argument('--parameters',type=Path,required=True,help='Parameters for this experiment; start from parameters.template.json')
@@ -437,7 +439,9 @@ def main():
     (out/'Methods'/'parameters.json').write_bytes(parameter_bytes)
     (out/'Methods'/'Effective_Parameters.json').write_text(json.dumps(p,indent=2), encoding='utf-8')
     print(f'Analysis output: {out}',flush=True)
-    # print(f'Analysis: 0/{len(files)} images processed; {len(files)} remaining',flush=True)
+    units_per_image=1+len(foci_channels)
+    progress=ProgressReporter('analysis',len(files)*units_per_image+1,args.progress_json)
+    progress.update(0,'Preparing analysis',force=True)
     mapping=[];cells=[];foci=[];nucaudit=[];focaudit=[];qc=[];intensity=[];sensitivity=[];metadata={};thresholds=[]
     for idx,path in enumerate(files,1):
         print(f'\nAnalyzing image {idx}/{len(files)}: {path.name}',flush=True)
@@ -466,6 +470,8 @@ def main():
         save_mask(out/'Masks'/f"{m['image_id']}_nuclei.tif",usable,sx,sy)
         save_mask(out/'Masks'/f"{m['image_id']}_nuclei_all_candidates.tif",candidates,sx,sy)
         for rec in na:nucaudit.append({**ids,'nucleus_id':f"{m['image_id']}_N{rec['nucleus_label']:03d}",**rec})
+        image_base=(idx-1)*units_per_image
+        progress.update(image_base+1,f'Image {idx}/{len(files)} · nuclear masks saved',force=True)
         cell_index={}
         for rec in accepted:
             cell={**ids,'nucleus_id':f"{m['image_id']}_N{rec['nucleus_label']:03d}",**rec}
@@ -479,7 +485,7 @@ def main():
                      'saturated_pixel_pct':float((a==saturation_value).mean()*100)}
             for q in [0,1,10,25,50,75,90,95,99,99.5,99.9,100]:histrow[f'p{q}_adu']=float(np.percentile(a,q))
             intensity.append(histrow)
-        for c in foci_channels:
+        for channel_index,c in enumerate(foci_channels):
             raw=arr[c-1].astype(float)
             sm=ndi.gaussian_filter(raw,p['foci']['gaussian_sigma_px'],mode='reflect')
             bg=morphology.opening(sm,morphology.disk(p['foci']['background_disk_radius_px'],decomposition=p['foci']['background_disk_decomposition']))
@@ -488,7 +494,11 @@ def main():
             tifffile.imwrite(out/'Masks'/f"{m['image_id']}_C{c}_background_model.tif",bg.astype(np.float32),imagej=True,
                              resolution=(1/sx,1/sy),metadata={'unit':'micron','axes':'YX'},compression='zlib')
             global_label=0;imagef=[];audit_start=len(focaudit);sens_counts={x:0 for x in p['foci']['sensitivity_threshold_factors']}
-            for nr in measure.regionprops(usable):
+            channel_base=image_base+1+channel_index
+            channel_steps=len(accepted)+2  # background, each nucleus, saved mask/QC
+            progress.update(channel_base+1/channel_steps,
+                            f'Image {idx}/{len(files)} · Channel {c} · background prepared',force=True)
+            for nucleus_index,nr in enumerate(measure.regionprops(usable),1):
                 pad=10;y0=max(0,nr.bbox[0]-pad);x0=max(0,nr.bbox[1]-pad)
                 y1=min(raw.shape[0],nr.bbox[2]+pad);x1=min(raw.shape[1],nr.bbox[3]+pad)
                 sl=(slice(y0,y1),slice(x0,x1));nm=usable[sl]==nr.label
@@ -515,6 +525,8 @@ def main():
                         count=int(ll.max())
                     sens_counts[factor]+=count
                     sensitivity.append({**ids,'nucleus_id':nid,'channel':c,'threshold_factor':factor,'foci_count':count})
+                progress.update(channel_base+(1+nucleus_index)/channel_steps,
+                                f'Image {idx}/{len(files)} · Channel {c} · nucleus {nucleus_index}/{len(accepted)}')
             save_mask(out/'Masks'/f"{m['image_id']}_C{c}_foci.tif",output_mask,sx,sy)
             cs=list(cell_index.values());faimage=focaudit[audit_start:]
             counts=np.array([r[f'C{c}_foci_count'] for r in cs])
@@ -543,9 +555,12 @@ def main():
                 'manual_inspection_warnings':''}
             qc.append(qr)
             print(' ',c,len(imagef),'foci;',sens_counts,'threshold sensitivity',flush=True)
+            # Reserve the final image checkpoint until its raw checksum passes.
+            if channel_index<len(foci_channels)-1:
+                progress.update(channel_base+1,f'Image {idx}/{len(files)} · Channel {c} · foci mask saved',force=True)
         cells.extend(cell_index.values())
         if hashlib.sha256(path.read_bytes()).hexdigest()!=m['sha256']:raise RuntimeError('Raw image changed during analysis')
-        # print(f'Analysis: {idx}/{len(files)} images processed; {len(files)-idx} remaining',flush=True)
+        progress.update(idx*units_per_image,f'Image {idx}/{len(files)} · masks and measurements complete',force=True)
     print('Saving measurement tables and analysis records...',flush=True)
     dfc=pd.DataFrame(cells);dff=pd.DataFrame(foci);dfq=pd.DataFrame(qc)
     # A selected channel can legitimately have no foci or usable nuclei.
@@ -645,11 +660,13 @@ def main():
     (out/'Methods'/'Effective_Parameters.json').write_text(json.dumps(p,indent=2), encoding='utf-8')
     print(json.dumps(run,indent=2),flush=True)
     print(f'Analysis complete: {len(files)}/{len(files)} images processed; 0 remaining',flush=True)
+    progress.advance('Measurement tables and analysis records saved',force=True)
     if args.qc_output!='off':
         print(f'Generating {args.qc_output} QC outputs...',flush=True)
         try:
             subprocess.run([sys.executable,str(Path(__file__).resolve().with_name('make_outputs.py')),
-                            '--output-dir',str(out),'--qc-output',args.qc_output],check=True)
+                            '--output-dir',str(out),'--qc-output',args.qc_output,
+                            *(['--progress-json'] if args.progress_json else [])],check=True)
         except subprocess.CalledProcessError as exc:
             print(f'Output generation failed; completed analysis is saved in {out}. '
                   'Rerun make_outputs.py for this folder to retry.',file=sys.stderr,flush=True)

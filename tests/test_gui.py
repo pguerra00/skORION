@@ -24,9 +24,11 @@ from analyze_foci import nuclear_segmentation
 QT_AVAILABLE = importlib.util.find_spec('PySide6') is not None
 if QT_AVAILABLE:
     os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
-    from PySide6.QtWidgets import QApplication
-    from PySide6.QtGui import QColor
+    from PySide6.QtWidgets import QApplication, QScrollArea
+    from PySide6.QtGui import QColor, QFontDatabase
     from orion_gui import OrionWindow
+    from gui_theme import DecoImageFrame, TOKENS
+    from progress_reporting import RunProgress, PREFIX
 
 PARAMETERS = json.loads((ROOT / 'parameters.template.json').read_text(encoding='utf-8'))
 
@@ -195,6 +197,68 @@ class DesktopTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             window.collect_parameters()
 
+    def test_studio_layout_fonts_and_color_drawer_fit_a_smaller_window(self):
+        window = self.make_window()
+        self.assertIn('Marcellus', QFontDatabase.families())
+        self.assertIn('Josefin Sans', QFontDatabase.families())
+        self.assertTrue(self.app.property('orionStudioTheme'))
+        self.assertEqual(TOKENS.space, 12)
+        window.show()
+        window.resize(1060, 800)
+        self.app.processEvents()
+        window.colors_toggle.setChecked(True)
+        window.advanced_toggle.setChecked(True)
+        self.app.processEvents()
+        self.assertEqual((window.width(), window.height()), (1060, 800))
+        self.assertGreaterEqual(window.viewer.width(), 240)
+        self.assertGreaterEqual(window.viewer.height(), 200)
+        for area in window.findChildren(QScrollArea):
+            self.assertEqual(area.horizontalScrollBar().maximum(), 0)
+        self.assertIsNotNone(window.findChild(DecoImageFrame))
+        self.assertFalse(window.rgb_enabled.isChecked())
+        self.assertTrue(window.rgb_container.isHidden())
+        self.assertTrue(window.rgb_help.isHidden())
+        window.rgb_enabled.setChecked(True)
+        self.app.processEvents()
+        self.assertFalse(window.rgb_container.isHidden())
+        self.assertEqual((window.width(), window.height()), (1060, 800))
+
+    def test_rgb_mapping_only_activates_when_the_input_batch_needs_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs, path, p = fixture(root)
+            order = ['green', 'blue', 'red']
+            p['rgb_channel_order'] = order
+            window = self.make_window()
+            window.parameters = p
+            window.load_controls()
+            self.assertTrue(window.rgb_enabled.isChecked())  # saved RGB experiment
+            window.input_dir.setText(str(inputs))
+            window.output_dir.setText(str(root / 'output'))
+            before = path.read_bytes()
+            window.load_images()
+            self.wait_until_idle(window)
+            self.assertFalse(window.rgb_enabled.isChecked())
+            self.assertTrue(window.rgb_container.isHidden())
+            self.assertIsNone(window.preview.parameters['rgb_channel_order'])
+            np.testing.assert_array_equal(window.preview.pixels, tifffile.imread(path))
+            self.assertEqual([combo.currentData() for combo in window.rgb_colors], order)
+            window.start_analysis()
+            self.wait_until_idle(window)
+            effective = json.loads((root / 'output/Methods/Effective_Parameters.json').read_text())
+            self.assertIsNone(effective['rgb_channel_order'])
+            self.assertEqual(path.read_bytes(), before)
+            # A mixed batch still needs the remembered mapping, even if its
+            # first image is a channel stack. No mapping is inferred from roles.
+            cyx = tifffile.imread(path)
+            rgb_path = inputs / 'Control_02.TIF'
+            tifffile.imwrite(rgb_path, np.moveaxis(cyx[[2, 0, 1]], 0, 2),
+                             photometric='rgb', resolution=(127000, 127000), resolutionunit='INCH')
+            mixed, _ = window.prepare_input_parameters(list_images(inputs))
+            self.assertTrue(window.rgb_enabled.isChecked())
+            self.assertFalse(window.rgb_container.isHidden())
+            self.assertEqual(mixed['rgb_channel_order'], order)
+
     def test_view_tabs_color_dialog_and_saved_display_preferences(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -278,9 +342,20 @@ class DesktopTests(unittest.TestCase):
             }.items():
                 window.advanced.editors[key][0].setText(value)
             window.qc_mode.setCurrentText('minimal')
+            overall_values = []
+            stage_values = []
+            window.progress.valueChanged.connect(overall_values.append)
+            window.stage_progress.valueChanged.connect(stage_values.append)
             window.start_analysis()
             self.wait_until_idle(window)
-            self.assertEqual(window.progress.value(), 1)
+            self.assertEqual(window.progress.value(), 100)
+            self.assertEqual(window.stage_progress.value(), 100)
+            self.assertEqual(window.overall_percent.text(), '100%')
+            self.assertEqual(window.stage_percent.text(), '100%')
+            self.assertEqual(overall_values, sorted(overall_values))
+            self.assertTrue(any(0 < v < 100 for v in overall_values))
+            self.assertTrue(any(0 < v < 100 for v in stage_values))
+            self.assertNotIn(PREFIX, window.log.toPlainText())
             self.assertEqual(window.table_origin, 'saved')
             self.assertTrue((root / 'output/Methods/Validation_Report.json').is_file())
             self.assertTrue((root / 'output/Review.html').is_file())
@@ -430,11 +505,78 @@ class DesktopTests(unittest.TestCase):
             while window.process.state() == window.process.ProcessState.Starting and time.monotonic() < deadline:
                 self.app.processEvents()
                 time.sleep(.01)
+            window.consume_process_output([(dict(stage='analysis', completed=2, total=4,
+                                                  detail='Half of mask work complete'), '')])
+            before = window.progress.value(), window.stage_progress.value()
             window.stop_analysis()
             self.wait_until_idle(window)
+            self.assertEqual((window.progress.value(), window.stage_progress.value()), before)
             self.assertEqual(stages, ['analyze_foci.py'])
             self.assertEqual(window.process.state(), window.process.ProcessState.NotRunning)
             self.assertIsNone(window.run_temp)
+
+    def test_failure_preserves_progress_and_next_run_resets_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs, _, p = fixture(root)
+            window = self.make_window()
+            window.parameters = p
+            window.load_controls()
+            window.input_dir.setText(str(inputs))
+            window.output_dir.setText(str(root / 'out'))
+            states = []
+
+            def fail_stage(script, args):
+                states.append((window.progress.value(), window.stage_progress.value()))
+                record = PREFIX + json.dumps(dict(stage='analysis', completed=1, total=2, detail='Image Δ'))
+                window.process.start(sys.executable, ['-c', 'import sys; print(sys.argv[1], flush=True); sys.exit(2)', record])
+
+            window.start_process = fail_stage
+            window.start_analysis()
+            deadline = time.monotonic() + 10
+            while window.busy and time.monotonic() < deadline:
+                self.app.processEvents()
+                time.sleep(.01)
+            self.assertFalse(window.busy)
+            self.assertEqual((window.progress.value(), window.stage_progress.value()), (45, 50))
+            self.assertIn('Analysis failed', window.test_errors[-1])
+            window.start_analysis()
+            deadline = time.monotonic() + 10
+            while window.busy and time.monotonic() < deadline:
+                self.app.processEvents()
+                time.sleep(.01)
+            self.assertFalse(window.busy)
+            self.assertEqual(states, [(0, 0), (0, 0)])
+            # A preflight error is not a new run and retains the failed run's values.
+            before = window.progress.value(), window.stage_progress.value()
+            window.input_dir.setText('')
+            window.start_analysis()
+            self.assertEqual((window.progress.value(), window.stage_progress.value()), before)
+            window.input_dir.setText(str(inputs))
+            window.start_process = lambda script, args: window.process.start(str(root / 'missing-executable'))
+            window.start_analysis()
+            deadline = time.monotonic() + 10
+            while window.busy and time.monotonic() < deadline:
+                self.app.processEvents()
+                time.sleep(.01)
+            self.assertFalse(window.busy)
+            self.assertEqual(window.progress.value(), 0)
+            self.assertIn('Could not start the analysis process', window.test_errors[-1])
+
+    def test_preview_has_no_overall_percentage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            inputs, _, p = fixture(Path(directory))
+            window = self.make_window()
+            window.parameters = p
+            window.load_controls()
+            window.input_dir.setText(str(inputs))
+            window.load_images()
+            self.assertEqual(window.overall_percent.text(), '—')
+            self.assertEqual(window.stage_progress.maximum(), 0)
+            self.wait_until_idle(window)
+            self.assertEqual(window.overall_percent.text(), '—')
+            self.assertEqual(window.stage_percent.text(), '100%')
+            self.assertEqual(window.stage_label.text(), 'Preview complete')
 
     def test_explicit_parameter_save_and_raw_directory_protection(self):
         with tempfile.TemporaryDirectory() as directory:
