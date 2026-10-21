@@ -138,7 +138,17 @@ class WorkerProgressTests(unittest.TestCase):
                 self.assertEqual(events[-1]['stage'], 'outputs')
                 self.assertEqual(events[-1]['detail'], 'Review reports saved')
                 # Two input images, two foci channels, one group, one usable nucleus.
-                self.assertEqual(events[-1]['total'], 39 if mode == 'minimal' else 54)
+                self.assertEqual(events[-1]['total'], 46 if mode == 'minimal' else 61)
+                for filename in ['Representative_Images.png','Representative_Images.svg',
+                                 'Methods/Representative_Image_Selection.csv','QC/Image_Outlier_Review.csv',
+                                 'QC/Representative_Display_Ranges.csv']:
+                    self.assertTrue((out/filename).exists(),filename)
+                selected=pd.read_csv(out/'Methods/Representative_Image_Selection.csv')
+                self.assertEqual(int(selected.selected.sum()),1)  # Blank image stays in measurements, not representatives.
+                self.assertTrue(selected.image_name.str.endswith('.TIF').all())
+                review=(out/'Review.html').read_text(encoding='utf-8')
+                self.assertIn('href="Representative_Images.png"',review)
+                self.assertIn(path.name,review)
             validation = self.run_worker('validate_results.py', '--output-dir', out)
             self.assertEqual(validation[-1]['total'], 4)
             self.assertEqual({f.name: f.read_bytes() for f in (out / 'Masks').iterdir()}, masks)

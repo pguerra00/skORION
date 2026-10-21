@@ -95,7 +95,7 @@ class DownstreamChannelTests(unittest.TestCase):
         self.assertNotIn('Nucleus_Crops contains',methods)
         for index,name in enumerate(['field_siControl_100MMC.tif','field_siControl_20PDS.tif'],1):
             self.assertIn(f'Analyzing image {index}/2: {name}',self.analysis_result.stdout)
-            self.assertIn(f'QC: {index}/2 images processed (I{index:02d})',self.analysis_result.stdout)
+            self.assertIn(f'QC: {index}/2 images processed ({name})',self.analysis_result.stdout)
         self.assertIn('Analysis complete: 2/2 images processed; 0 remaining',self.analysis_result.stdout)
         mapping=pd.read_csv(out/'Methods/Treatment_Group_Mapping.csv')
         self.assertEqual(mapping.group_names.map(json.loads).tolist(),[['siControl','100MMC'],['siControl','20PDS']])

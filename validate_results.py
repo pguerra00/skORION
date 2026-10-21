@@ -8,6 +8,7 @@ import tifffile
 from channel_config import add_channel_arguments, resolve_channels, check_channel_inputs
 from image_io import read_channels
 from progress_reporting import add_progress_argument, ProgressReporter
+from image_review import image_display_name
 
 
 def main():
@@ -84,7 +85,7 @@ def main():
             ck(ir[f'C{c}_total_foci']==len(ff)==cs[f'C{c}_foci_count'].sum(),f'{im} C{c}: image total reconciles to nuclei and foci')
             actual=ir[f'C{c}_mean_foci_per_nucleus'];expected=cs[f'C{c}_foci_count'].mean()
             ck((pd.isna(actual) and pd.isna(expected)) or math.isclose(actual,expected,rel_tol=1e-9),f'{im} C{c}: image mean includes zero-focus nuclei')
-        progress.advance(f'Image {image_index}/{len(mapping)} · pixels, masks, and tables reconciled')
+        progress.advance(f'Image {image_index}/{len(mapping)} · {image_display_name(m)} · pixels, masks, and tables reconciled')
     counts={'images':len(image),'nuclei':len(cell),**{f'channel_{c}_foci':int((focus.channel==c).sum()) for c in foci_channels}}
     report={'status':'passed','counts':counts,'checks_passed':len(checks),'checks':checks,
             'nuclear_channel':nuclear_channel,'foci_channels':foci_channels,

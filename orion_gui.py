@@ -29,6 +29,7 @@ try:
     from gui_analysis import (FLOOR_KEYS, analyze_preview, default_display_colors, list_images,
                               render_image, validate_parameters, validate_run_paths)
     from image_io import inspect_image
+    from gui_identity import apply_application_identity, prepare_taskbar
     from progress_reporting import ProgressStream, RunProgress, STAGE_LABELS
     from gui_theme import (APP_STYLE, TOKENS, DecoForm, DecoHeader, DecoImageFrame, DecoInspectionDock,
                            DecoPanel, DecoSurface, apply_theme, button_variant,
@@ -233,6 +234,7 @@ class OrionWindow(QMainWindow):
     def __init__(self, parameter_file=None, input_dir=None, output_dir=None):
         apply_theme(QApplication.instance())
         super().__init__()
+        self.setWindowIcon(apply_application_identity(QApplication.instance()))
         self.setWindowTitle(' · scikitORION · ')
         self.resize(1320, 950)
         self.parameters = json.loads((ROOT / 'parameters.template.json').read_text(encoding='utf-8'))
@@ -1293,8 +1295,8 @@ def main():
     parser.add_argument('--input-dir', type=Path, help='Initial input directory')
     parser.add_argument('--output-dir', type=Path, help='Initial output directory')
     args = parser.parse_args()
+    prepare_taskbar()
     app = QApplication(sys.argv[:1])
-    app.setApplicationName('scikitORION')
     apply_theme(app)
     window = OrionWindow(args.parameters, args.input_dir, args.output_dir)
     window.show()

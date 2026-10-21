@@ -67,7 +67,7 @@ class SharedContrastTests(unittest.TestCase):
                 outputs.make_shared_contrast(qdir, mapping, params)
             self.assertEqual(outputs.plt.get_fignums(), [])
             for c in samples:
-                self.assertEqual(seen[c], mapping.image_id.tolist())
+                self.assertEqual(seen[c], mapping.image_name.tolist())
                 for filename, _ in outputs.shared_contrast_pages(mapping, c):
                     with Image.open(qdir / filename) as image:
                         self.assertLessEqual(image.width, 4000)

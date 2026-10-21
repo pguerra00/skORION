@@ -38,6 +38,7 @@ scikitORION/
 ├── validate_results.py
 ├── channel_config.py
 ├── image_io.py
+├── image_review.py
 ├── make_workbook.mjs
 ├── parameters.template.json
 ├── requirements.txt
@@ -58,7 +59,7 @@ workspace. The generated output records the script version and effective
 parameters used for that run.
 
 Keep `analyze_foci.py`, `make_outputs.py`, `validate_results.py`,
-`channel_config.py`, `image_io.py`, and `progress_reporting.py` together. You can copy this folder's contents into your
+`channel_config.py`, `image_io.py`, `image_review.py`, and `progress_reporting.py` together. You can copy this folder's contents into your
 working directory. No installation as a Python package is required; install
 the dependencies in `requirements.txt` in your Python environment.
 
@@ -121,6 +122,30 @@ If setup finds an incompatible `.venv-gui` folder, rename it and rerun setup.
 If installation or launch fails, the window stays open with the error message.
 Rerun `setup_windows.bat` after updating the project's dependencies. The
 environment belongs to its current folder; rerun setup if you move the project.
+
+To transfer the current project from a Mac, double-click
+**`package_windows.command`**. It rebuilds the clean Windows ZIP and reveals it
+in Finder. You can also run it from Terminal:
+
+```sh
+./package_windows.command
+```
+
+Or run the underlying packager directly from the project folder:
+
+```sh
+python3 package_windows.py
+```
+
+Copy `dist/scikitORION-windows.zip` to Windows, extract it, then run setup and
+the launcher as above. The bundle includes the current GUI, progress module,
+fonts, icons, analysis scripts, configuration template, and tests. Rebuild it
+after updating the project. Local Python environments (`.venv`, `.venv-gui`),
+Git history, caches, and `Analyses` are excluded. Keep the `assets` folder in
+the bundle; it supplies the GUI fonts and icons. If you make a ZIP manually,
+exclude those local environments too, since a copied Mac `.venv-gui` prevents
+Windows setup from creating its environment. Install Python 3.12 (64-bit) and
+allow internet access for the initial setup on the destination machine.
 
 For command-line analysis in Windows PowerShell, use the same environment
 directly, with quoted paths:
@@ -197,6 +222,11 @@ python3.12 -m venv .venv-gui
 On macOS, after this setup, double-click `launch_gui.command` to open the GUI.
 On Windows, double-click `launch_gui.bat` after running `setup_windows.bat`.
 You can also start with `--input-dir`, `--output-dir`, and `--parameters` options.
+
+The approved **Orbital Diamond** icon appears in the macOS Dock and Windows
+taskbar while the GUI is running. Icon resources are bundled in `assets/icons`;
+keep the `assets` folder with the application scripts when copying them. Restart
+an already running GUI to see an updated icon.
 
 The **Studio** workspace uses the approved Art Deco design: obsidian surfaces,
 gold geometric frames, Marcellus headings, and Josefin Sans controls. Fonts and
@@ -441,6 +471,44 @@ name for a different analysis to avoid mixing it with older outputs.
 - `Report.md` and `Review.html`: generated summaries and visual review.
 - `Experiment_Summary.png` and `.svg`: a single experiment overview for eLab
   entries or sharing, saved beside `Review.html`.
+- `Representative_Images.png` and `.svg`: up to two representative full-field
+  images per treatment, shown with separate nuclear/foci channel rows.
+
+Representative selection compares each image to its combined treatment's means
+for the four summary endpoints across all selected foci channels. Distances are
+standardized by sample standard deviation so different measurement units have
+equal weight. Metrics with fewer than two finite values or no variation are
+ignored. Candidates with fuller metric coverage rank first, followed by smaller
+root-mean-square distance; ties use original filename and internal ID. Images
+with no usable nuclei or flagged outliers are ineligible. Fewer than two eligible
+images produces labeled empty slots, never duplicated images. Partial metric
+coverage is labeled, and all-constant measurements use the filename tie-break.
+The audit in `Methods/Representative_Image_Selection.csv` records every image's
+score, coverage, eligibility, rank, and selection, together with group means/scales.
+
+The representative grid adapts to the number of treatments: 10 groups use five
+columns by two rows, and nine groups use three by three. Each treatment contains
+two image columns and rows for the unique nuclear/selected foci channels. Source
+aspect ratios and calibrated scale bars are retained. A shared dataset-wide
+contrast range per channel matches the shared-contrast QC; its limits are saved
+in `QC/Representative_Display_Ranges.csv`. Display downsampling leaves measured
+pixels unchanged.
+
+`QC/Image_Outlier_Review.csv` assesses the same endpoints within each treatment.
+Values outside Q1 − 1.5 × IQR or Q3 + 1.5 × IQR are flagged only when at least five
+finite images and positive IQR are available. Missing values, small groups, and
+zero IQR are recorded as unassessed. Flags request review and affect representative
+selection only: every image remains in all measurements, means, and summary plots.
+The HTML shows a flagged-image count, a collapsible reasons table with image
+links, and flags on image cards and treatment inspection sections. Existing QC
+warnings remain visible.
+
+Original filenames are used for displayed image names and progress messages.
+Internal `image_id` values, nucleus/focus IDs, CSV keys, and generated mask paths
+remain unchanged, so existing analyses and links remain compatible. Older mappings
+without `image_name` use the source-path basename. Both new figures and review
+audits are regenerated in minimal and detailed modes for the selected channels;
+no new CLI options or parameters are required.
 
 The experiment summary is generated in both minimal and detailed QC modes. Each
 selected foci channel has four image-level endpoint panels (mean foci/nucleus,
@@ -540,4 +608,5 @@ python -m unittest discover -s tests -p 'test*.py' -v
 Run this from the project folder. Tests create their images and outputs in
 temporary directories. `.github/workflows/windows.yml` runs installation,
 the launcher, and the regression suite on Windows with Python 3.12, including
-a checkout path containing spaces and Unicode.
+a checkout path containing spaces and Unicode. Windows checks use Qt's native
+Windows backend so the font and layout tests exercise the desktop application.

@@ -466,12 +466,12 @@ def main():
             rec.update(nuclear_channel=nuclear_channel,nuclear_marker=marker(nuclear_channel))
         accepted=[r for r in na if r['included']]
         excluded=len(na)-len(accepted)
-        print(m['image_id'],m['treatment_group'],'---',len(accepted),'usable nuclei;',excluded,'excluded',flush=True)
+        print(m['image_name'],m['treatment_group'],'---',len(accepted),'usable nuclei;',excluded,'excluded',flush=True)
         save_mask(out/'Masks'/f"{m['image_id']}_nuclei.tif",usable,sx,sy)
         save_mask(out/'Masks'/f"{m['image_id']}_nuclei_all_candidates.tif",candidates,sx,sy)
         for rec in na:nucaudit.append({**ids,'nucleus_id':f"{m['image_id']}_N{rec['nucleus_label']:03d}",**rec})
         image_base=(idx-1)*units_per_image
-        progress.update(image_base+1,f'Image {idx}/{len(files)} · nuclear masks saved',force=True)
+        progress.update(image_base+1,f'Image {idx}/{len(files)} · {path.name} · nuclear masks saved',force=True)
         cell_index={}
         for rec in accepted:
             cell={**ids,'nucleus_id':f"{m['image_id']}_N{rec['nucleus_label']:03d}",**rec}
@@ -497,7 +497,7 @@ def main():
             channel_base=image_base+1+channel_index
             channel_steps=len(accepted)+2  # background, each nucleus, saved mask/QC
             progress.update(channel_base+1/channel_steps,
-                            f'Image {idx}/{len(files)} · Channel {c} · background prepared',force=True)
+                            f'Image {idx}/{len(files)} · {path.name} · Channel {c} · background prepared',force=True)
             for nucleus_index,nr in enumerate(measure.regionprops(usable),1):
                 pad=10;y0=max(0,nr.bbox[0]-pad);x0=max(0,nr.bbox[1]-pad)
                 y1=min(raw.shape[0],nr.bbox[2]+pad);x1=min(raw.shape[1],nr.bbox[3]+pad)
@@ -526,7 +526,7 @@ def main():
                     sens_counts[factor]+=count
                     sensitivity.append({**ids,'nucleus_id':nid,'channel':c,'threshold_factor':factor,'foci_count':count})
                 progress.update(channel_base+(1+nucleus_index)/channel_steps,
-                                f'Image {idx}/{len(files)} · Channel {c} · nucleus {nucleus_index}/{len(accepted)}')
+                                f'Image {idx}/{len(files)} · {path.name} · Channel {c} · nucleus {nucleus_index}/{len(accepted)}')
             save_mask(out/'Masks'/f"{m['image_id']}_C{c}_foci.tif",output_mask,sx,sy)
             cs=list(cell_index.values());faimage=focaudit[audit_start:]
             counts=np.array([r[f'C{c}_foci_count'] for r in cs])
@@ -557,10 +557,10 @@ def main():
             print(' ',c,len(imagef),'foci;',sens_counts,'threshold sensitivity',flush=True)
             # Reserve the final image checkpoint until its raw checksum passes.
             if channel_index<len(foci_channels)-1:
-                progress.update(channel_base+1,f'Image {idx}/{len(files)} · Channel {c} · foci mask saved',force=True)
+                progress.update(channel_base+1,f'Image {idx}/{len(files)} · {path.name} · Channel {c} · foci mask saved',force=True)
         cells.extend(cell_index.values())
         if hashlib.sha256(path.read_bytes()).hexdigest()!=m['sha256']:raise RuntimeError('Raw image changed during analysis')
-        progress.update(idx*units_per_image,f'Image {idx}/{len(files)} · masks and measurements complete',force=True)
+        progress.update(idx*units_per_image,f'Image {idx}/{len(files)} · {path.name} · masks and measurements complete',force=True)
     print('Saving measurement tables and analysis records...',flush=True)
     dfc=pd.DataFrame(cells);dff=pd.DataFrame(foci);dfq=pd.DataFrame(qc)
     # A selected channel can legitimately have no foci or usable nuclei.

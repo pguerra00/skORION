@@ -23,7 +23,7 @@ from analyze_foci import nuclear_segmentation
 
 QT_AVAILABLE = importlib.util.find_spec('PySide6') is not None
 if QT_AVAILABLE:
-    os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+    os.environ.setdefault('QT_QPA_PLATFORM', 'windows' if sys.platform == 'win32' else 'offscreen')
     from PySide6.QtWidgets import QApplication, QScrollArea
     from PySide6.QtGui import QColor, QFontDatabase
     from orion_gui import OrionWindow

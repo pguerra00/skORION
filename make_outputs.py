@@ -17,6 +17,7 @@ from matplotlib.lines import Line2D
 from channel_config import add_channel_arguments, resolve_channels, check_channel_inputs, marker_name, selected_columns
 from image_io import read_channels
 from progress_reporting import add_progress_argument, ProgressReporter, advance
+from image_review import image_display_name, representative_grid, review_images
 
 GROUPS=['20PDS','100MMC','ART558_20PDS']
 LABELS=['20PDS','100MMC','ART558 + 20PDS']
@@ -84,10 +85,9 @@ def shared_contrast_pages(mapping,c):
         yield f'C{c}_Shared_Contrast{suffix}.png',mapping.iloc[start:start+SHARED_CONTRAST_PAGE_SIZE]
 
 
-def make_shared_contrast(qdir,mapping,p,progress=None):
-    """Render bounded grids with one dataset-wide display range per channel."""
-    if mapping.empty:return
-    for c in p['foci_channels']:
+def shared_display_ranges(mapping,channels,p,progress=None):
+    ranges={}
+    for c in channels:
         # Copy only sampled pixels so the views cannot retain full TIFF stacks.
         samples=[]
         for path in mapping.source_path:
@@ -100,6 +100,16 @@ def make_shared_contrast(qdir,mapping,p,progress=None):
         lim=np.percentile(sample,[1,99.9])
         del sample
         advance(progress,f'Channel {c} · shared display range calculated')
+        ranges[c]=lim
+    return ranges
+
+
+def make_shared_contrast(qdir,mapping,p,progress=None,display_ranges=None):
+    """Render bounded grids with one dataset-wide display range per channel."""
+    if mapping.empty:return
+    ranges=shared_display_ranges(mapping,p['foci_channels'],p,progress) if display_ranges is None else display_ranges
+    for c in p['foci_channels']:
+        lim=ranges[c]
         total=math.ceil(len(mapping)/SHARED_CONTRAST_PAGE_SIZE)
         for page,(filename,fields) in enumerate(shared_contrast_pages(mapping,c),1):
             ncols=min(SHARED_CONTRAST_COLUMNS,len(fields))
@@ -111,7 +121,7 @@ def make_shared_contrast(qdir,mapping,p,progress=None):
                     raw=read_channels(m.source_path,p)
                     ax.imshow(raw[c-1],cmap='gray',vmin=lim[0],vmax=lim[1])
                     del raw
-                    ax.set_title(f'{m.treatment_group} · {m.image_id}')
+                    ax.set_title(textwrap.fill(f'{m.treatment_group} · {image_display_name(m)}',60),fontsize=10)
                     scale_bar(ax,m.pixel_size_x_um)
                 fig.suptitle(f'Channel {c} · shared display range {lim[0]:.0f}–{lim[1]:.0f} ADU for all images · page {page}/{total}\nDisplay only. Bright pixels above the display range appear white.',fontsize=11)
                 fig.savefig(qdir/filename,dpi=200)
@@ -120,7 +130,7 @@ def make_shared_contrast(qdir,mapping,p,progress=None):
                 plt.close(fig)
 
 
-def make_qc(out,mapping,cell,focus,p,progress=None):
+def make_qc(out,mapping,cell,focus,p,progress=None,display_ranges=None):
     qdir=out/'QC'
     detailed=p.get('qc_output','detailed')=='detailed'
     if detailed:
@@ -130,7 +140,7 @@ def make_qc(out,mapping,cell,focus,p,progress=None):
     rows=[(p['nuclear_channel'],'nuclear')]+[(c,'foci') for c in p['foci_channels']]
     print(f'QC: 0/{len(mapping)} images processed',flush=True)
     for index,(_,m) in enumerate(mapping.iterrows(),1):
-        im=m.image_id;raw=read_channels(m.source_path,p);sx=m.pixel_size_x_um
+        im=m.image_id;name=image_display_name(m);raw=read_channels(m.source_path,p);sx=m.pixel_size_x_um
         nuc=tifffile.imread(out/'Masks'/f'{im}_nuclei.tif');alln=tifffile.imread(out/'Masks'/f'{im}_nuclei_all_candidates.tif')
         exc=np.where(nuc==0,alln,0)
         masks={c:tifffile.imread(out/'Masks'/f'{im}_C{c}_foci.tif') for c in p['foci_channels']}
@@ -152,23 +162,23 @@ def make_qc(out,mapping,cell,focus,p,progress=None):
                 axs[row,2].imshow(label_rgb(nuc));axs[row,2].set_title(f'Nuclear label mask · {cell[cell.image_id==im].shape[0]} analyzed')
                 if detailed:
                     save_rgb(qdir/'Native_Overlays'/f'{im}_C{c}_nuclear_outlines.png',rgb)
-                    advance(progress,f'{im} · Channel {c} · nuclear overlay saved')
+                    advance(progress,f'{name} · Channel {c} · nuclear overlay saved')
             else:
                 rgb=overlay(a,lim,mask,nuc,exc)
                 axs[row,1].imshow(rgb);axs[row,1].set_title(f'C{c} counted foci outlined in yellow\n{len(focus[(focus.image_id==im)&(focus.channel==c)]):,} objects in usable nuclei')
                 axs[row,2].imshow(label_rgb(mask));axs[row,2].set_title(f'C{c} object label mask\ncolors distinguish adjacent objects')
                 if detailed:
                     save_rgb(qdir/'Native_Overlays'/f'{im}_C{c}_foci_outlines.png',rgb)
-                    advance(progress,f'{im} · Channel {c} · foci overlay saved')
+                    advance(progress,f'{name} · Channel {c} · foci overlay saved')
                     save_rgb(qdir/'Native_Overlays'/f'{im}_C{c}_raw_display.png',np.repeat(norm(a,lim)[...,None],3,axis=2))
-                    advance(progress,f'{im} · Channel {c} · raw display saved')
+                    advance(progress,f'{name} · Channel {c} · raw display saved')
                     save_rgb(qdir/'Native_Overlays'/f'{im}_C{c}_labels.png',label_rgb(mask))
-                    advance(progress,f'{im} · Channel {c} · label display saved')
+                    advance(progress,f'{name} · Channel {c} · label display saved')
             for ax in axs[row]:ax.set_xticks([]);ax.set_yticks([])
             scale_bar(axs[row,0],sx)
-        fig.suptitle(f'{im} · {m.treatment_group} · {m.image_name}\n2D image. Display scaling is for QC only; measurements use stored pixel values.',fontsize=11)
+        fig.suptitle(textwrap.fill(f'{name} · {m.treatment_group}',110)+'\n2D image. Display scaling is for QC only; measurements use stored pixel values.',fontsize=11)
         fig.savefig(qdir/f'{im}_Annotated_QC.png',dpi=260);plt.close(fig)
-        advance(progress,f'Image {index}/{len(mapping)} · annotated QC saved')
+        advance(progress,f'Image {index}/{len(mapping)} · {name} · annotated QC saved')
         # Per-nucleus paired raw/outline views include every usable nucleus.
         crops=cell[cell.image_id==im] if detailed else cell.iloc[:0]
         for _,cr in crops.iterrows():
@@ -190,14 +200,70 @@ def make_qc(out,mapping,cell,focus,p,progress=None):
                 axs[row,1].imshow(rgb,interpolation='nearest');axs[row,1].set_title(title,fontsize=10)
                 for ax in axs[row]:ax.set_xticks([]);ax.set_yticks([])
                 scale_bar(axs[row,0],sx,5)
-            fig.suptitle(f'{cr.nucleus_id} · {m.treatment_group}\nYellow = counted focus boundary.',fontsize=11)
+            fig.suptitle(textwrap.fill(f'{name} · N{nl:03d} · {m.treatment_group}',85)+'\nYellow = counted focus boundary.',fontsize=11)
             fig.savefig(qdir/'Nucleus_Crops'/f'{cr.nucleus_id}.png',dpi=150);plt.close(fig)
-            advance(progress,f'{cr.nucleus_id} · nucleus crop saved')
-        print(f'QC: {index}/{len(mapping)} images processed ({im})',flush=True)
+            advance(progress,f'{name} · N{nl:03d} · nucleus crop saved')
+        print(f'QC: {index}/{len(mapping)} images processed ({name})',flush=True)
     pd.DataFrame(displays).to_csv(qdir/'QC_Display_Ranges.csv',index=False)
     advance(progress,'QC display ranges saved',force=True)
     print('Rendering shared-contrast QC figures...',flush=True)
-    make_shared_contrast(qdir,mapping,p,progress=progress)
+    make_shared_contrast(qdir,mapping,p,progress=progress,display_ranges=display_ranges)
+
+
+def make_representative_images(out,mapping,selection,p,display_ranges,progress=None):
+    """Render two full-field representatives per group with shared contrast."""
+    groups=list(mapping.treatment_group.unique());nrows,ncols=representative_grid(len(groups))
+    channels=list(dict.fromkeys([p['nuclear_channel'],*p['foci_channels']]))
+    pd.DataFrame([dict(channel=c,display_low_adu=display_ranges[c][0],display_high_adu=display_ranges[c][1],
+                       rule='Dataset-wide sampled percentile 1 to 99.9; shared with shared-contrast QC')
+                  for c in channels]).to_csv(out/'QC'/'Representative_Display_Ranges.csv',index=False)
+    advance(progress,'Representative display ranges saved')
+    height=1.4+1.8*len(channels)
+    fig=plt.figure(figsize=(5.8*ncols,height*nrows+1),layout='constrained')
+    try:
+        panels=np.asarray(fig.subfigures(nrows,ncols,squeeze=False)).ravel()
+        fig.suptitle(textwrap.fill(out.name,100)+' · representative images',fontsize=15,weight='bold')
+        for j,(panel,g) in enumerate(zip(panels,groups)):
+            color=COLORS[j%len(COLORS)]
+            panel.suptitle(textwrap.fill(str(g),48),color=color,weight='bold',fontsize=11)
+            axes=panel.subplots(len(channels),2,squeeze=False)
+            candidates=selection[selection.treatment_group==g]
+            chosen=candidates[candidates.selected].sort_values('rank')
+            for slot in range(2):
+                if slot>=len(chosen):
+                    reasons=candidates.loc[~candidates.eligible,'ineligibility_reason'].unique()
+                    explanation='Fewer than two eligible images'
+                    if len(reasons):explanation+='\n'+', '.join(reasons)
+                    for ax in axes[:,slot]:ax.axis('off')
+                    axes[0,slot].text(.5,.5,textwrap.fill(explanation,30),ha='center',va='center',transform=axes[0,slot].transAxes,fontsize=9)
+                    continue
+                record=chosen.iloc[slot];m=mapping[mapping.image_id==record.image_id].iloc[0]
+                raw=read_channels(m.source_path,p)
+                stride=max(1,math.ceil(max(raw.shape[-2:])/1024))
+                for row,c in enumerate(channels):
+                    ax=axes[row,slot];lo,hi=display_ranges[c]
+                    # Copy a bounded display plane so imshow cannot retain the raw stack.
+                    display=raw[c-1,::stride,::stride].copy()
+                    width=raw.shape[-1]*float(m.pixel_size_x_um)
+                    height_um=raw.shape[-2]*float(m.pixel_size_y_um)
+                    ax.imshow(display,cmap='gray',vmin=lo,vmax=max(hi,lo+1),
+                              extent=(0,width,height_um,0),interpolation='nearest',aspect='equal')
+                    label=f'C{c} {marker_name(p,c)}'
+                    if row==0:
+                        label=textwrap.fill(image_display_name(m),32)+'\n'+label
+                        if record.partial_metrics:label+=' · partial metrics'
+                    ax.set_title(label,fontsize=8)
+                    ax.set_xticks([]);ax.set_yticks([])
+                    scale_bar(ax,1,width=min(20,width/4))
+                del raw
+            advance(progress,f'{g} · representative image panels prepared')
+        for panel in panels[len(groups):]:panel.subplots().axis('off')
+        fig.supxlabel('Closest unflagged images to treatment means across selected-channel endpoints.\n'
+                      'Shared display range per channel; full fields, calibrated scale bars. Selection audit: Methods/Representative_Image_Selection.csv.',fontsize=8)
+        figsave(fig,out,'Representative_Images')
+        advance(progress,'Representative image figure saved',force=True)
+    finally:
+        plt.close(fig)
 
 
 def treatment_ticks(ax,fontsize=8):
@@ -406,7 +472,7 @@ def input_intensity_distributions(mapping,c,p,progress=None):
                         'mean_intensity':float(np.mean(a,dtype=np.float64)),
                         'all_zero':bool(np.all(a==0))})
         del a,positive
-        advance(progress,f'{m.image_id} · Channel {c} · intensity range inspected')
+        advance(progress,f'{image_display_name(m)} · Channel {c} · intensity range inspected')
     bins=np.geomspace(lower,upper,130)
     for record,(_,m) in zip(records,mapping.iterrows()):
         a=read_channels(m.source_path,p)[c-1]
@@ -414,7 +480,7 @@ def input_intensity_distributions(mapping,c,p,progress=None):
         # Normalize by ALL pixels, including the zero mass omitted on a log axis.
         record['density']=counts/(a.size*np.diff(bins))
         del a
-        advance(progress,f'{m.image_id} · Channel {c} · intensity distribution calculated')
+        advance(progress,f'{image_display_name(m)} · Channel {c} · intensity distribution calculated')
     return bins,records
 
 
@@ -657,6 +723,12 @@ Image_Level_Endpoints and Focus_Positive_Nuclei use saved image-level measuremen
 
 Experiment_Summary.png and Experiment_Summary.svg combine four saved image-level endpoints and three ECDFs per selected foci channel. ECDFs use all finite nucleus counts (including zero-focus nuclei), individual focus areas, and individual focus mean raw intensities. Area and intensity ECDF axes are logarithmic when positive observations exist. Exactly two selected foci channels add a scatter of their paired counts from each usable nucleus row, colored by combined treatment_group; zero counts are retained and pairs with nonfinite counts are omitted. The scatter is descriptive, without fitted lines, correlation statistics, or significance tests. Summary generation uses saved tables without reading raw images or repeating segmentation.
 
+Representative_Images.png and Representative_Images.svg show up to two eligible full-field images per combined treatment, using the same images for all selected channels. Selection uses the four image-level endpoints in the experiment summary for every selected foci channel. Each metric's arithmetic mean and sample standard deviation include all finite image values, including outliers; metrics with fewer than two values or zero standard deviation are ignored. Eligible images are ordered by the number of available usable metrics (descending), then root-mean-square standardized distance from the group means (ascending), then original filename and internal ID. Images without usable nuclei, images flagged as within-treatment outliers, and images with no usable endpoint values are ineligible. All-constant metrics give equal distances and deterministic filename ties. Partial-metric selections and missing representative slots are identified explicitly. Methods/Representative_Image_Selection.csv records scores, coverage, ranks, eligibility, selections, and group means/scales.
+
+Within-treatment image outlier review applies Q1 - 1.5 x IQR and Q3 + 1.5 x IQR independently to those endpoints, with NumPy linear quantiles. A metric requires at least five finite image values and positive IQR. Boundary-equal values are not flagged; missing values, insufficient sample sizes, and zero IQR are recorded as unassessed. QC/Image_Outlier_Review.csv records every assessment and its fences. An image flagged on any selected-channel endpoint is ineligible as a representative but remains in every measurement table, group mean, and statistical plot. Existing numerical QC warnings remain separate. These are descriptive manual-review flags, not automatic exclusions from analysis.
+
+Representative panels and shared-contrast QC use the same dataset-wide sampled 1st–99.9th percentile display ranges per channel. Representatives include the nuclear channel, retain full fields and physical aspect ratio, and use bounded display copies plus calibrated scale bars. Display values are not measurement transforms. QC/Representative_Display_Ranges.csv records their limits. Original filenames identify images in figures, reports, and progress; I-style IDs and mask/nucleus/focus keys remain stable internally for compatibility.
+
 This analysis measures objects in 2D projections, not 3D foci: overlap in Z can merge distinct foci and alter areas. Signal background subtraction, thresholds, resolution and the field selected affect counts. No cross-channel colocalization or biological comparison is performed. Nuclear annotation and focus ground truth would be needed to estimate precision/recall and validate absolute counts.
 
 ## Reproduce
@@ -677,8 +749,12 @@ scikit-image official documentation: [morphology and h-maxima](https://scikit-im
     (out/'Methods'/'Methods.md').write_text(methods, encoding='utf-8')
 
 
-def report(out,mapping,images,cell,focus,qc,p):
+def report(out,mapping,images,cell,focus,qc,p,outliers=None):
     def esc(x):return html.escape(str(x))
+    names={m.image_id:image_display_name(m) for _,m in mapping.iterrows()}
+    if outliers is None:outliers,_=review_images(mapping,images,p)
+    flagged=outliers[outliers.outlier] if len(outliers) else outliers
+    flagged_ids=set(flagged.image_id) if len(flagged) else set()
     detailed=p.get('qc_output','detailed')=='detailed'
     channels=p['foci_channels']
     nuclear=f"C{p['nuclear_channel']} ({marker_name(p,p['nuclear_channel'])})"
@@ -688,11 +764,13 @@ def report(out,mapping,images,cell,focus,qc,p):
         cols.extend([f'C{c}_total_foci',f'C{c}_mean_foci_per_nucleus'])
         labels.extend([f'C{c} {marker_name(p,c)} foci',f'C{c} mean / nucleus'])
     summary=images[cols].copy();summary.columns=labels
+    summary['Image']=images.image_id.map(names).fillna(images.image_id)
     totals=' · '.join(f'C{c} {marker_name(p,c)}: {int((focus.channel==c).sum()):,} foci' for c in channels)
     body='''<!doctype html><html><head><meta charset="utf-8"><title>Foci analysis review</title><style>
 body{font:16px/1.55 system-ui,Arial;color:#203043;background:#f7f9fb;max-width:1250px;margin:auto;padding:35px}h1{font-size:32px}h2{margin-top:2.2em}a{color:#006b9c}table{border-collapse:collapse;background:white;width:100%;font-size:14px}th,td{padding:10px;border-bottom:1px solid #dbe2e9;text-align:left}th{background:#243c50;color:white}img{max-width:100%;height:auto}article{background:white;padding:22px;margin:18px 0;border:1px solid #dbe2e9;border-radius:8px}.treatment-images{background:white;padding:18px 22px;margin:14px 0;border:1px solid #dbe2e9;border-radius:8px}.note{border-left:4px solid #d69132;padding:12px 18px;background:#fff6e8}.gallery{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}.gallery img{width:100%}summary{cursor:pointer;font-weight:600}small{color:#526779}.links a{margin-right:18px}li{margin-bottom:7px}</style></head><body>'''
     body+=f'<h1>Fluorescent foci quantification</h1><p>{len(mapping)} images · {mapping.treatment_group.nunique()} groups · {len(cell)} usable nuclei · {esc(totals)}</p>'
     body+='<p class="links"><a href="Experiment_Summary.png">Experiment summary (PNG)</a><a href="Experiment_Summary.svg">Experiment summary (editable SVG)</a></p>'
+    body+='<p class="links"><a href="Representative_Images.png">Representative images (PNG)</a><a href="Representative_Images.svg">Representative images (SVG)</a><a href="Methods/Representative_Image_Selection.csv">Selection audit</a></p>'
     body+='<p class="note">All comparisons are descriptive. Nuclei and foci are nested within images. Detected objects and 2D areas require QC review; dense and faint signal remain sources of uncertainty.</p>'
     if 'input_format' in mapping and mapping.input_format.eq('rgb_export').any():
         body+='<p class="note">RGB export analysis: channels use the saved color mapping. Intensities are stored color-component values, not recovered detector ADU. Export display settings and clipping can affect measurements; treat these results as exploratory.</p>'
@@ -702,7 +780,20 @@ body{font:16px/1.55 system-ui,Arial;color:#203043;background:#f7f9fb;max-width:1
     body+=summary.to_html(index=False,float_format=lambda x:f'{x:,.2f}',border=0)
     body+=f'<p>Nuclear segmentation: {esc(nuclear)}. Marker labels come from the analysis configuration. Border nuclei are excluded; focus-negative nuclei remain in summaries. Per-image calibration is recorded in the image mapping.</p>'
     body+='<h2>QC findings</h2><p>Flags identify inspection targets and never exclude images. Full reasons, thresholds and sensitivity counts are in the QC table.</p>'
-    body+=qc[['image_id','channel','number_usable_nuclei','number_excluded_nuclei','manual_inspection_warnings']].to_html(index=False,border=0)
+    qc_display=qc[['image_id','channel','number_usable_nuclei','number_excluded_nuclei','manual_inspection_warnings']].copy()
+    qc_display['image_id']=qc_display.image_id.map(names).fillna(qc_display.image_id)
+    body+=qc_display.rename(columns={'image_id':'Image'}).to_html(index=False,border=0)
+    body+=f'<p class="note"><strong>{len(flagged_ids)} image(s) flagged for within-treatment outlier review.</strong> Flags use 1.5 × IQR fences with at least five finite images and positive IQR per endpoint. Flagged images remain in all measurement summaries and graphs; they are ineligible as representatives.</p>'
+    assessed=int((outliers.assessment_status=='assessed').sum()) if len(outliers) else 0
+    if not assessed:body+='<p>No endpoints could be assessed for outliers: groups had insufficient finite values or zero IQR. This does not establish that the images are free of outliers.</p>'
+    body+='<p><a href="QC/Image_Outlier_Review.csv">Full outlier assessment, including unassessed endpoints</a></p>'
+    if len(flagged):
+        rows=[]
+        for _,r in flagged.iterrows():
+            rows.append({'Image':f'<a href="QC/{esc(r.image_id)}_Annotated_QC.png">{esc(names.get(r.image_id,r.image_name))}</a>',
+                         'Treatment':esc(r.treatment_group),'Channel':int(r.channel),'Endpoint':esc(r.metric),
+                         'Observed':f'{r.value:.5g}','Lower fence':f'{r.lower_fence:.5g}','Upper fence':f'{r.upper_fence:.5g}'})
+        body+='<details><summary>Review flagged images and reasons</summary>'+pd.DataFrame(rows).to_html(index=False,border=0,escape=False)+'</details>'
     body+='<h2>Treatment comparisons within each channel</h2>'
     for c in p['foci_channels']:
         body+=f'<article><h3>Channel {c} · '+esc(marker_name(p,c))+'</h3>'
@@ -729,9 +820,12 @@ body{font:16px/1.55 system-ui,Arial;color:#203043;background:#f7f9fb;max-width:1
     body+='<h2>Inspect every image</h2><p>Expand a treatment group to inspect its images. Open the full annotated image to zoom. Yellow outlines mark counted objects; cyan marks analyzed nuclei and red marks excluded nuclei. Colors in label masks distinguish objects, not intensity.</p>'
     for group,fields in mapping.groupby('treatment_group',sort=False,dropna=False):
         count=len(fields)
-        body+=f'<details class="treatment-images"><summary>{esc(group)} · {count} image{"s" if count!=1 else ""}</summary>'
+        flagged_count=sum(im in flagged_ids for im in fields.image_id)
+        flag_label=f' · {flagged_count} flagged for review' if flagged_count else ''
+        body+=f'<details class="treatment-images"><summary>{esc(group)} · {count} image{"s" if count!=1 else ""}{flag_label}</summary>'
         for _,m in fields.iterrows():
-            im=m.image_id;body+=f'<article><h3>{esc(im)} · {esc(m.treatment_group)}</h3><small>{esc(m.image_name)}</small>'
+            im=m.image_id;body+=f'<article><h3>{esc(image_display_name(m))} · {esc(m.treatment_group)}</h3>'
+            if im in flagged_ids:body+='<p class="note"><strong>Outlier review requested</strong> — one or more image endpoints lie outside the within-treatment fences.</p>'
             body+=f'<a href="QC/{im}_Annotated_QC.png"><img loading="lazy" src="QC/{im}_Annotated_QC.png"></a>'
             body+='<p class="links">'
             for c in p['foci_channels']:
@@ -742,7 +836,8 @@ body{font:16px/1.55 system-ui,Arial;color:#203043;background:#f7f9fb;max-width:1
             if detailed:
                 body+=f'<details><summary>All {len(cell[cell.image_id==im])} analyzed nuclei, individually</summary><div class="gallery">'
                 for _,cr in cell[cell.image_id==im].iterrows():
-                    nid=cr.nucleus_id;body+=f'<a href="QC/Nucleus_Crops/{nid}.png"><img loading="lazy" src="QC/Nucleus_Crops/{nid}.png"><small>{nid}</small></a>'
+                    nid=cr.nucleus_id;display=f'{image_display_name(m)} · {str(nid).rsplit("_",1)[-1]}'
+                    body+=f'<a href="QC/Nucleus_Crops/{nid}.png"><img loading="lazy" src="QC/Nucleus_Crops/{nid}.png"><small>{esc(display)}</small></a>'
                 body+='</div></details>'
             body+='</article>'
         body+='</details>'
@@ -756,11 +851,15 @@ body{font:16px/1.55 system-ui,Arial;color:#203043;background:#f7f9fb;max-width:1
         lines.append('| '+' | '.join(f'{v:.2f}' if isinstance(v,float) else str(v) for v in row)+' |')
     lines+=['',f'Methods: foreground segmentation and distance watershed on {nuclear}; channel-specific background opening, noise-adaptive thresholds, object watershed, size and local-contrast filters.',
             '', 'QC inspection findings:','']
-    for _,r in qc.iterrows():lines.append(f'- {r.image_id}, C{r.channel}: {r.manual_inspection_warnings}.')
+    for _,r in qc.iterrows():lines.append(f'- {names.get(r.image_id,r.image_id)}, C{r.channel}: {r.manual_inspection_warnings}.')
+    lines+=['',f'Within-treatment outlier review: {len(flagged_ids)} image(s) flagged. See QC/Image_Outlier_Review.csv for endpoint values, fences, and unassessed cases.']
     if p.get('group_names'):
         lines+=['','Comparisons use combined treatment_group labels. Each image, nucleus, and focus contributes once to its treatment group.']
     lines+=['','Major outputs:','', '- Review.html: linked review report'+(' and nucleus galleries.' if detailed else '.'),
             '- [Experiment_Summary.png](Experiment_Summary.png) and [Experiment_Summary.svg](Experiment_Summary.svg): experiment overview with image-level endpoints, ECDFs, and a nucleus scatter when exactly two foci channels are selected.',
+            '- [Representative_Images.png](Representative_Images.png) and [Representative_Images.svg](Representative_Images.svg): up to two unflagged images per treatment, with separate channel views and shared contrast.',
+            '- Methods/Representative_Image_Selection.csv: scores, metric coverage, selection ranks, and eligibility reasons.',
+            '- QC/Image_Outlier_Review.csv: within-treatment endpoint assessments and review flags.',
             '- Results/: image, cell, focus, and QC measurement tables.',
             '- QC/: annotated figures, '+('native overlays, nucleus crops, ' if detailed else '')+'shared-contrast figures, per-treatment input intensity plots (PNG and SVG), and QC metrics.',
             '- Plots/: '+', '.join(f'Channel_{c}' for c in channels)+'; comparison figures in PNG and SVG.',
@@ -776,17 +875,19 @@ def output_work_total(mapping,cell,p):
     counted so source-image preparation reports real progress before rendering.
     """
     n=len(mapping);channels=len(p['foci_channels'])
+    display_channels=len(set([p['nuclear_channel'],*p['foci_channels']]))
     pages=math.ceil(n/SHARED_CONTRAST_PAGE_SIZE)
     groups=len(mapping.treatment_group.unique())
     work={
         'preparation_and_records':5,  # setup, QC ranges, summary, methods, reports
         'annotated_qc':n,
-        'shared_contrast_sampling':n*channels,
-        'shared_contrast_ranges':channels,
+        'shared_contrast_sampling':n*display_channels,
+        'shared_contrast_ranges':display_channels,
         'shared_contrast_pages':pages*channels,
         'comparison_figures':7*channels,
         'intensity_scan_and_histogram':2*n*channels,
         'treatment_intensity_figures':groups*channels,
+        'representatives_and_outliers':groups+3,  # review audits, display ranges, group panels, figure
     }
     if p.get('qc_output','detailed')=='detailed':
         work['native_overlays']=n*(1+3*channels)
@@ -824,13 +925,20 @@ def main():
     progress.update(0,'Preparing output generation',force=True)
     (out/'Methods'/'Output_Parameters.json').write_text(json.dumps(p,indent=2), encoding='utf-8')
     progress.advance('Output preparation and saved-input checks complete',force=True)
-    make_qc(out,mapping,cell,focus,p,progress=progress)
+    outliers,selection=review_images(mapping,images,p)
+    outliers.to_csv(out/'QC'/'Image_Outlier_Review.csv',index=False)
+    selection.to_csv(out/'Methods'/'Representative_Image_Selection.csv',index=False)
+    progress.advance('Outlier assessments and representative selection saved',force=True)
+    display_channels=list(dict.fromkeys([p['nuclear_channel'],*channels]))
+    display_ranges=shared_display_ranges(mapping,display_channels,p,progress=progress)
+    make_qc(out,mapping,cell,focus,p,progress=progress,display_ranges=display_ranges)
     make_plots(out,cell,focus,images,p,progress=progress)
     make_experiment_summary(out,mapping,images,cell,focus,p,progress=progress)
+    make_representative_images(out,mapping,selection,p,display_ranges,progress=progress)
     print('Writing methods and review reports...',flush=True)
     build_methods(out,p,mapping,images,cell,focus,qc)
     progress.advance('Methods and data dictionary saved',force=True)
-    report(out,mapping,images,cell,focus,qc,p)
+    report(out,mapping,images,cell,focus,qc,p,outliers=outliers)
     progress.advance('Review reports saved',force=True)
     print('QC, plots, methods and report complete',flush=True)
 

@@ -14,7 +14,9 @@ jobs:
     timeout-minutes: 20
     env:
       ORION_NO_PAUSE: '1'
-      QT_QPA_PLATFORM: offscreen
+      # Exercise the desktop font backend: offscreen returned an empty font
+      # database on the Windows runner despite successful application runs.
+      QT_QPA_PLATFORM: windows
     steps:
       - uses: actions/checkout@v4
         with:
