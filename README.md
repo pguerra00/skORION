@@ -21,6 +21,8 @@ directory.
 - Configurable nuclear segmentation and per-channel foci detection.
 - One-based command-line channel selection with saved run manifests.
 - Per-image, per-nucleus, and per-focus measurement tables.
+- Optional many-to-many colocalization analysis of two foci channels, including
+  nuclear Pearson coefficients, overlap, distances, partner counts and signal fractions.
 - Masks, annotated QC images, shared-contrast figures, plots, Markdown/HTML
   review material, methods records, and validation reports.
 - SHA-256 source-image hashes and version/parameter records for provenance.
@@ -59,7 +61,8 @@ workspace. The generated output records the script version and effective
 parameters used for that run.
 
 Keep `analyze_foci.py`, `make_outputs.py`, `validate_results.py`,
-`channel_config.py`, `image_io.py`, `image_review.py`, and `progress_reporting.py` together. You can copy this folder's contents into your
+`channel_config.py`, `image_io.py`, `image_review.py`, `progress_reporting.py`,
+`colocalization.py`, `colocalization_outputs.py`, and `colocalization_validation.py` together. You can copy this folder's contents into your
 working directory. No installation as a Python package is required; install
 the dependencies in `requirements.txt` in your Python environment.
 
@@ -312,6 +315,44 @@ scientific result tables or parameter files.
 
 This first desktop version launches from Python; it is not yet packaged as a
 standalone installer. The original command-line workflow remains available.
+
+## Optional colocalization analysis
+
+Check **Analyze colocalization** beneath the foci-channel selections to reveal
+Marker A, Marker B, and Minimum shared pixels. The default pair is Channels 2/3
+and the default minimum is one shared pixel. Both distinct channels must already
+be selected for foci analysis. Settings are saved by **Save JSON…** and restored
+by **Load JSON**. The same settings work through the command-line parameter file:
+
+```json
+"colocalization": {
+  "enabled": true,
+  "channels": [2, 3],
+  "minimum_overlap_pixels": 1
+}
+```
+
+Colocalization uses the existing accepted nuclei and focus masks. All qualifying
+relationships are retained: three A foci overlapping one B focus count as three
+associated A foci, one associated B focus, and three A–B relationships. No new
+segmentation, mask dilation, registration, or statistical testing is performed.
+
+**Preview image** includes colocalization measurements in the results and nucleus
+inspector. The optional **Colocalization** view shows associated objects brightly,
+unassociated objects dimly, and qualifying shared pixels in yellow. Its colors
+encode association status; other views retain the editable channel palettes.
+
+New runs save `Results/Colocalization_Pairs.csv`, `Colocalization_Foci.csv`,
+`Colocalization_Nuclei.csv`, and `Colocalization_Images.csv`, even when QC output
+is off. With reports enabled, a dedicated section appears after the plots and
+files/reproducibility links, immediately before **Inspect every image**.
+It includes treatment figures, per-image overlays, definitions and CSV links.
+Existing configurations without the colocalization block remain disabled;
+existing results remain loadable. To add measurements to an older analysis,
+run a new analysis with colocalization enabled in a new output directory.
+
+See [COLOCALIZATION.md](COLOCALIZATION.md) for definitions, aggregation,
+missing values, scientific references, and validation scope.
 
 ## Fixed nuclear thresholds
 

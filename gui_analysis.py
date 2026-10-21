@@ -11,6 +11,7 @@ from analyze_foci import (detect_nucleus, focus_measurements, nuclear_segmentati
                           select_channels, summarize_cell, validate_group_names,
                           validate_nuclear_threshold_range)
 from image_io import read_image, validate_pixel_size, validate_rgb_channel_order
+from colocalization import calculate as calculate_colocalization, settings as colocalization_settings
 
 FLOOR_KEYS = ('support_floor_adu', 'seed_floor_adu', 'prominence_floor_adu')
 
@@ -31,6 +32,7 @@ def validate_parameters(parameters, channel_count=None):
     """Validate GUI settings before starting a worker or writing run outputs."""
     p = deepcopy(parameters)
     nuclear, foci = select_channels(p)
+    p['colocalization'] = colocalization_settings(p, foci, channel_count)
     # The engine permits measuring the nuclear stain for foci as well. Keep the
     # selections independent rather than silently reassigning any channel.
     validate_nuclear_threshold_range(p['nuclear'])
@@ -84,6 +86,7 @@ class Preview:
     cells: list
     foci: list
     thresholds: list
+    colocalization: object = None
 
 
 def analyze_preview(path, parameters):
@@ -94,7 +97,7 @@ def analyze_preview(path, parameters):
     sx, sy = md['pixel_size_x_um'], md['pixel_size_y_um']
     usable, candidates, audit = nuclear_segmentation(arr[p['nuclear_channel'] - 1], p['nuclear'], sx, sy)
     cells = {r['nucleus_label']: dict(r) for r in audit if r['included']}
-    masks, all_foci, thresholds = {}, [], []
+    masks, all_foci, thresholds, backgrounds = {}, [], [], {}
     saturation = md['saturation_value'] if md['saturation_value'] is not None else np.inf
     for channel in p['foci_channels']:
         raw = arr[channel - 1].astype(float)
@@ -123,8 +126,17 @@ def analyze_preview(path, parameters):
             cells[region.label].update({f'C{channel}_{key}': value for key, value in summary.items()})
             thresholds.append(dict(nucleus_label=region.label, channel=channel, **applied))
         masks[channel] = mask
+        if p['colocalization']['enabled'] and channel in p['colocalization']['channels']:
+            backgrounds[channel] = background.astype(np.float32)
+    colocalization = None
+    if p['colocalization']['enabled']:
+        colocalization = calculate_colocalization(arr, usable, masks, backgrounds, all_foci, p, sx, sy,
+                                                 {'image_id': 'preview', 'image_name': Path(path).name})
+        for record in colocalization.nuclei.to_dict('records'):
+            cells[record['nucleus_label']].update({f'coloc_{key}': value for key, value in record.items()
+                                                  if key not in ('nucleus_label', 'nucleus_id')})
     return Preview(Path(path), p, arr, md, usable, candidates, audit, masks,
-                   list(cells.values()), all_foci, thresholds)
+                   list(cells.values()), all_foci, thresholds, colocalization)
 
 
 def channel_color(channel):
@@ -175,6 +187,11 @@ def render_image(pixels, parameters, preview=None, mode='Overlay', raw_channel=N
             if channel in visible and channel != n:
                 canvas += display_signal(pixels[channel - 1])[..., None] * color(channel) * .65
     if preview is not None:
+        if mode == 'Colocalization' and getattr(preview, 'colocalization', None) is not None:
+            from colocalization_outputs import overlay_rgb
+            canvas = overlay_rgb(preview.nuclei, preview.foci_masks,
+                                 preview.colocalization.foci, preview.colocalization.pairs,
+                                 visible_channels=visible, nuclear_visible=n in visible, outlines=outlines) * 255
         if mode == 'Nuclei' and n in visible:
             canvas[preview.nuclei > 0] = color(n) * .45
         if mode in ('Overlay', 'Nuclei') and outlines and n in visible:

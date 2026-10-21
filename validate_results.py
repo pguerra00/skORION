@@ -9,6 +9,8 @@ from channel_config import add_channel_arguments, resolve_channels, check_channe
 from image_io import read_channels
 from progress_reporting import add_progress_argument, ProgressReporter
 from image_review import image_display_name
+from colocalization import read_tables as read_colocalization_tables
+from colocalization_validation import validate_image as validate_colocalization_image
 
 
 def main():
@@ -23,6 +25,7 @@ def main():
     try:
         p=resolve_channels(out,args.nuclear_channel,args.foci_channels)
         check_channel_inputs(out,p,mapping,image,cell,qc)
+        coloc_tables=read_colocalization_tables(out,p)
     except ValueError as exc:
         ap.error(str(exc))
     nuclear_channel=p['nuclear_channel'];foci_channels=p['foci_channels']
@@ -36,6 +39,12 @@ def main():
     ck(not cell.nucleus_id.duplicated().any(),'Nucleus IDs are globally unique')
     ck(not focus.focus_id.duplicated().any(),'Focus IDs are globally unique')
     ck(set(focus.nucleus_id)<=set(cell.nucleus_id),'Every focus maps to an included nucleus')
+    if coloc_tables:
+        for name,table in coloc_tables.items():
+            ck(set(table.image_id)<=set(mapping.image_id),f'Colocalization {name}: no unmapped image IDs')
+        ck(set(coloc_tables['Images'].image_id)==set(mapping.image_id)
+           and not coloc_tables['Images'].image_id.duplicated().any(),
+           'Every mapped image has exactly one colocalization summary')
     ck((focus.replicate_id.isna()).all() and (cell.replicate_id.isna()).all(),'Replicate IDs remain missing; no biological replicates invented')
     numeric=focus.select_dtypes(include='number').drop(columns=['replicate_id'],errors='ignore')
     optional=['aspect_ratio','focus_to_background_ratio','local_signal_to_background_ratio','local_contrast_snr']
@@ -85,11 +94,14 @@ def main():
             ck(ir[f'C{c}_total_foci']==len(ff)==cs[f'C{c}_foci_count'].sum(),f'{im} C{c}: image total reconciles to nuclei and foci')
             actual=ir[f'C{c}_mean_foci_per_nucleus'];expected=cs[f'C{c}_foci_count'].mean()
             ck((pd.isna(actual) and pd.isna(expected)) or math.isclose(actual,expected,rel_tol=1e-9),f'{im} C{c}: image mean includes zero-focus nuclei')
+        if coloc_tables:
+            validate_colocalization_image(out,p,m,raw,nu,cs,focus[focus.image_id==im],coloc_tables,ck)
         progress.advance(f'Image {image_index}/{len(mapping)} · {image_display_name(m)} · pixels, masks, and tables reconciled')
     counts={'images':len(image),'nuclei':len(cell),**{f'channel_{c}_foci':int((focus.channel==c).sum()) for c in foci_channels}}
     report={'status':'passed','counts':counts,'checks_passed':len(checks),'checks':checks,
             'nuclear_channel':nuclear_channel,'foci_channels':foci_channels,
             'rgb_channel_order':p.get('rgb_channel_order'),
+            'colocalization':p.get('colocalization'),
             'validation_scope':'Independent pixel/mask/table reconciliation for the selected channels; not validation against human focus ground truth.'}
     (out/'Methods'/'Validation_Report.json').write_text(json.dumps(report,indent=2), encoding='utf-8')
     progress.advance('Validation report saved',force=True)

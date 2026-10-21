@@ -18,6 +18,8 @@ from channel_config import add_channel_arguments, resolve_channels, check_channe
 from image_io import read_channels
 from progress_reporting import add_progress_argument, ProgressReporter, advance
 from image_review import image_display_name, representative_grid, review_images
+from colocalization import settings as colocalization_settings, read_tables as read_colocalization_tables
+import colocalization_outputs
 
 GROUPS=['20PDS','100MMC','ART558_20PDS']
 LABELS=['20PDS','100MMC','ART558 + 20PDS']
@@ -603,10 +605,12 @@ def build_methods(out,p,mapping,images,cell,focus,qc):
                 {'parameter':'method_reference.watershed','value':'https://scikit-image.org/docs/0.26.x/api/skimage.segmentation.html#skimage.segmentation.watershed'}])
     pd.DataFrame(par).to_csv(out/'Methods'/'Analysis_Parameters.csv',index=False)
     tables={'Image_Summary':images,'Cell_Summary':cell,'Focus_Data':focus,'QC_Summary':qc}
+    tables.update({f'Colocalization_{name}':table for name,table in read_colocalization_tables(out,p).items()})
     dictionary=[]
     for sheet,df in tables.items():
         for col in df:
-            dictionary.append({'table':sheet,'column':col,'data_type':str(df[col].dtype),'definition':definition(col)})
+            desc=(colocalization_outputs.definition(col) if sheet.startswith('Colocalization_') else None)
+            dictionary.append({'table':sheet,'column':col,'data_type':str(df[col].dtype),'definition':desc or definition(col)})
     pd.DataFrame(dictionary).to_csv(out/'Methods'/'Data_Dictionary.csv',index=False)
     # JSON matrix for the required spreadsheet authoring library, preserving numeric types and missing values.
     wb={name:{'columns':list(df.columns),'rows':json.loads(df.to_json(orient='values'))} for name,df in tables.items()}
@@ -746,6 +750,10 @@ The optional workbook renderer still has C2/C3 column-order assumptions. It uses
 ## Algorithm references
 scikit-image official documentation: [morphology and h-maxima](https://scikit-image.org/docs/0.26.x/api/skimage.morphology.html), [marker-controlled watershed](https://scikit-image.org/docs/0.26.x/api/skimage.segmentation.html#skimage.segmentation.watershed), and [region measurements](https://scikit-image.org/docs/0.26.x/api/skimage.measure.html). These document implementations; they do not validate the selected parameters for this assay.
 '''
+    if colocalization_settings(p)['enabled']:
+        methods=methods.replace('No cross-channel colocalization or biological comparison is performed.',
+                                'Cross-channel colocalization is described below; no inferential biological comparisons are performed.')
+        methods+=colocalization_outputs.methods_text(p)
     (out/'Methods'/'Methods.md').write_text(methods, encoding='utf-8')
 
 
@@ -816,7 +824,9 @@ body{font:16px/1.55 system-ui,Arial;color:#203043;background:#f7f9fb;max-width:1
     body+='<h2>Files and reproducibility</h2><ul>'
     for f in ['Results/Image_Summary.csv','Results/Cell_Summary.csv','Results/Focus_Data.csv','QC/Nucleus_Inclusion_Audit.csv','QC/Focus_Candidate_Audit.csv','QC/Threshold_Sensitivity.csv','QC/Input_Intensity_Distributions.csv','Methods/Applied_Thresholds.csv','Methods/Data_Dictionary.csv','Methods/Run_Manifest.json','Methods/Validation_Report.json','Methods/Methods.md']:
         body+=f'<li><a href="{f}">{f}</a></li>'
-    body+='</ul><p>No cross-channel colocalization analysis was performed. Thresholds and object definitions were shared across treatments. Run parameters and provenance are in Methods/; reusable tools are kept separately in the scripts folder.</p>'
+    body+='</ul><p>'+('' if colocalization_settings(p)['enabled'] else 'No cross-channel colocalization analysis was performed. ')
+    body+='Thresholds and object definitions were shared across treatments. Run parameters and provenance are in Methods/; reusable tools are kept separately in the scripts folder.</p>'
+    body+=colocalization_outputs.report_section(out,p,read_colocalization_tables(out,p))
     body+='<h2>Inspect every image</h2><p>Expand a treatment group to inspect its images. Open the full annotated image to zoom. Yellow outlines mark counted objects; cyan marks analyzed nuclei and red marks excluded nuclei. Colors in label masks distinguish objects, not intensity.</p>'
     for group,fields in mapping.groupby('treatment_group',sort=False,dropna=False):
         count=len(fields)
@@ -865,6 +875,11 @@ body{font:16px/1.55 system-ui,Arial;color:#203043;background:#f7f9fb;max-width:1
             '- Plots/: '+', '.join(f'Channel_{c}' for c in channels)+'; comparison figures in PNG and SVG.',
             '- Methods/Output_Parameters.json: parameters and channel selection for this report.',
             '', 'Limitations: 2D projections; no manual ground truth. Dense or dim foci are parameter sensitive. See Methods/Methods.md for definitions.']
+    if colocalization_settings(p)['enabled']:
+        lines+=['', '## Colocalization analysis', '',
+                'See the colocalization section in [Review.html](Review.html#colocalization), after the plots and before image inspection.',
+                'Tables: '+', '.join(f'[Colocalization_{name}.csv](Results/Colocalization_{name}.csv)' for name in ('Pairs','Foci','Nuclei','Images')),
+                colocalization_outputs.methods_text(p)]
     (out/'Report.md').write_text('\n'.join(lines)+'\n', encoding='utf-8')
 
 
@@ -892,6 +907,8 @@ def output_work_total(mapping,cell,p):
     if p.get('qc_output','detailed')=='detailed':
         work['native_overlays']=n*(1+3*channels)
         work['nucleus_crops']=len(cell)
+    if colocalization_settings(p)['enabled']:
+        work['colocalization']=len(colocalization_outputs.FIGURES)+n
     return sum(work.values())
 
 
@@ -909,6 +926,7 @@ def main():
     try:
         p=resolve_channels(out,args.nuclear_channel,args.foci_channels)
         check_channel_inputs(out,p,mapping,images,cell,qc)
+        coloc_tables=read_colocalization_tables(out,p)
     except ValueError as exc:
         ap.error(str(exc))
     channels=p['foci_channels']
@@ -935,6 +953,8 @@ def main():
     make_plots(out,cell,focus,images,p,progress=progress)
     make_experiment_summary(out,mapping,images,cell,focus,p,progress=progress)
     make_representative_images(out,mapping,selection,p,display_ranges,progress=progress)
+    if coloc_tables:
+        colocalization_outputs.make_figures(out,mapping,p,coloc_tables,GROUPS,COLORS,progress)
     print('Writing methods and review reports...',flush=True)
     build_methods(out,p,mapping,images,cell,focus,qc)
     progress.advance('Methods and data dictionary saved',force=True)

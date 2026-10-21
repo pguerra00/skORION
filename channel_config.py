@@ -3,6 +3,7 @@ import json
 import re
 
 from image_io import inspect_image
+from colocalization import settings as colocalization_settings
 
 
 def add_channel_arguments(parser):
@@ -30,7 +31,7 @@ def resolve_channels(out, nuclear_channel=None, foci_channels=None):
             parameters.update(json.loads(path.read_text(encoding='utf-8')))
     manifest_path = methods / 'Run_Manifest.json'
     manifest = json.loads(manifest_path.read_text(encoding='utf-8')) if manifest_path.exists() else {}
-    for key in ['nuclear_channel', 'foci_channels', 'rgb_channel_order', 'pixel_size_um']:
+    for key in ['nuclear_channel', 'foci_channels', 'rgb_channel_order', 'pixel_size_um', 'colocalization']:
         if key in manifest:
             parameters[key] = manifest[key]
     recorded_nuclear = parameters.get('nuclear_channel')
@@ -50,6 +51,7 @@ def resolve_channels(out, nuclear_channel=None, foci_channels=None):
         raise ValueError(f'Requested foci channels were not analyzed. Saved channels: {recorded_foci}. '
                          'Rerun analyze_foci.py for additional channels')
     parameters.update(nuclear_channel=nuclear, foci_channels=list(foci))
+    parameters['colocalization'] = colocalization_settings(parameters)
     return parameters
 
 

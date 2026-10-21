@@ -16,7 +16,7 @@ try:
         QApplication, QAbstractItemView, QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox,
         QFileDialog, QFormLayout, QGraphicsScene, QGraphicsView, QGridLayout, QGroupBox,
         QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox,
-        QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSplitter,
+        QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QSplitter,
         QTabBar, QTabWidget, QTableWidget, QTableWidgetItem, QToolButton, QTreeWidget,
         QTreeWidgetItem, QVBoxLayout, QWidget,
     )
@@ -40,7 +40,7 @@ except ImportError as exc:
 
 ROOT = Path(__file__).resolve().parent
 BASIC_KEYS = {'group_names', 'nuclear_channel', 'foci_channels', 'nuclear.fixed_threshold_adu',
-              'qc_output', 'rgb_channel_order', 'gui_display'}
+              'qc_output', 'rgb_channel_order', 'gui_display', 'colocalization'}
 # These strings describe fixed algorithms; editing them would not change execution.
 METHOD_KEYS = {
     'analysis_version', 'input_axis_order', 'analysis_unit', 'statistical_testing',
@@ -341,6 +341,28 @@ class OrionWindow(QMainWindow):
         self.foci_layout = QVBoxLayout(self.foci_container)
         self.foci_layout.setContentsMargins(0, 0, 0, 0)
         form.addRow('Foci channels', self.foci_container)
+        self.coloc_enabled = QCheckBox('Analyze colocalization')
+        self.coloc_enabled.setAccessibleName('Analyze colocalization')
+        form.addRow(self.coloc_enabled)
+        self.coloc_container = QWidget()
+        coloc_form = DecoForm(self.coloc_container)
+        coloc_form.setContentsMargins(0, 0, 0, 0)
+        self.coloc_a, self.coloc_b = QComboBox(), QComboBox()
+        for name, combo in [('Marker A channel', self.coloc_a), ('Marker B channel', self.coloc_b)]:
+            combo.setAccessibleName(name)
+            combo.currentIndexChanged.connect(self.invalidate_preview)
+            coloc_form.addRow(name, combo)
+        self.coloc_minimum = QSpinBox()
+        self.coloc_minimum.setRange(1, 2147483647)
+        self.coloc_minimum.setValue(1)
+        self.coloc_minimum.setAccessibleName('Minimum shared pixels')
+        self.coloc_minimum.valueChanged.connect(self.invalidate_preview)
+        coloc_form.addRow('Minimum shared pixels', self.coloc_minimum)
+        coloc_form.addRow(text_label('Shared pixels establish an association. All qualifying partners are retained. '
+                                     'In the Colocalization view, bright objects have partners; dim objects do not. Yellow marks qualifying shared pixels.'))
+        form.addRow(self.coloc_container)
+        self.coloc_container.hide()
+        self.coloc_enabled.toggled.connect(self.colocalization_changed)
         self.threshold = QComboBox()
         self.threshold.addItems(['Automatic · median / MAD', 'Manual · ADU range'])
         form.addRow('Nuclear thresholding', self.threshold)
@@ -483,8 +505,13 @@ class OrionWindow(QMainWindow):
         self.nucleus_info.setWordWrap(True)
         self.nucleus_info.setTextFormat(Qt.TextFormat.PlainText)
         self.nucleus_info.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        inspection.addWidget(self.nucleus_info)
-        inspection.addStretch()
+        self.nucleus_info.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        self.nucleus_scroll = QScrollArea()
+        self.nucleus_scroll.setWidgetResizable(True)
+        self.nucleus_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.nucleus_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.nucleus_scroll.setWidget(self.nucleus_info)
+        inspection.addWidget(self.nucleus_scroll, 1)
         self.tabs.addTab(self.inspector, 'Nucleus inspector')
         results = QWidget()
         result_layout = QVBoxLayout(results)
@@ -634,6 +661,13 @@ class OrionWindow(QMainWindow):
                     *[int(k) for k in p.get('channels', {}) if k.isdecimal()],
                     *[int(k[8:]) for k in p['foci'] if k.startswith('channel_') and k[8:].isdecimal()])
         self.build_channels(count)
+        coloc = p.get('colocalization', {})
+        self.sync_colocalization_channels(coloc.get('channels', [2, 3]))
+        self.coloc_minimum.setValue(coloc.get('minimum_overlap_pixels', 1))
+        self.coloc_enabled.blockSignals(True)
+        self.coloc_enabled.setChecked(coloc.get('enabled', False))
+        self.coloc_enabled.blockSignals(False)
+        self.colocalization_changed(invalidate=False)
         self.advanced.load(p)
 
     def build_channels(self, count):
@@ -667,6 +701,34 @@ class OrionWindow(QMainWindow):
         self.nuclear.blockSignals(False)
         self.rebuild_layers()
         self.rebuild_color_controls()
+        self.sync_colocalization_channels()
+
+    def sync_colocalization_channels(self, choices=None):
+        if choices is None:
+            choices = [combo.currentData() for combo in (self.coloc_a, self.coloc_b)]
+        selected = [c for c, check in self.foci_checks.items() if check.isChecked()]
+        for combo, channel in zip((self.coloc_a, self.coloc_b), choices):
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItem('Choose channel…', None)
+            for c in selected:
+                combo.addItem(f'Channel {c}', c)
+            combo.setCurrentIndex(max(0, combo.findData(channel)))
+            combo.blockSignals(False)
+
+    def colocalization_changed(self, *_, invalidate=True):
+        enabled = self.coloc_enabled.isChecked()
+        self.coloc_container.setVisible(enabled)
+        index = next((i for i in range(self.view_tabs.count())
+                      if self.view_tabs.tabText(i) == 'Colocalization'), -1)
+        if enabled and index < 0:
+            self.view_tabs.addTab('Colocalization')
+        elif not enabled and index >= 0:
+            if self.view_tabs.currentIndex() == index:
+                self.view_tabs.setCurrentIndex(3)
+            self.view_tabs.removeTab(index)
+        if invalidate:
+            self.invalidate_preview()
 
     @staticmethod
     def read_display_colors(parameters):
@@ -749,6 +811,7 @@ class OrionWindow(QMainWindow):
         for channel, (box, _) in self.floors.items():
             box.setVisible(self.foci_checks[channel].isChecked())
         self.rebuild_layers()
+        self.sync_colocalization_channels()
         self.invalidate_preview()
 
     def rgb_changed(self, *_):
@@ -853,6 +916,9 @@ class OrionWindow(QMainWindow):
         p['group_names'] = [name.strip() for name in self.groups.text().split(',')] if self.groups.text().strip() else []
         p['nuclear_channel'] = self.nuclear.currentData()
         p['foci_channels'] = [c for c, check in self.foci_checks.items() if check.isChecked()]
+        p['colocalization'] = {'enabled': self.coloc_enabled.isChecked(),
+                               'channels': [self.coloc_a.currentData(), self.coloc_b.currentData()],
+                               'minimum_overlap_pixels': self.coloc_minimum.value()}
         p['nuclear']['fixed_threshold_adu'] = ([self.lower.value(), self.upper.value()]
                                              if self.threshold.currentIndex() == 1 else None)
         for channel, (_, controls) in self.floors.items():
@@ -1071,7 +1137,7 @@ class OrionWindow(QMainWindow):
         if max([n, *foci]) > self.pixels.shape[0]:
             return
         p = dict(nuclear_channel=n, foci_channels=foci)
-        if self.preview is None and mode in ('Nuclei', 'Foci'):
+        if self.preview is None and mode in ('Nuclei', 'Foci', 'Colocalization'):
             rgb = np.zeros((*self.pixels.shape[1:], 3), dtype=np.uint8)
         else:
             raw_channel = self.raw_channel.currentData() or n
@@ -1115,6 +1181,23 @@ class OrionWindow(QMainWindow):
                     line += ' · ADU support / seed / prominence: ' + ' / '.join(
                         f'{t[key]:.3g}' for key in ('support_threshold_adu', 'seed_threshold_adu', 'prominence_threshold_adu'))
                 lines.append(line)
+            if self.preview.colocalization is not None:
+                table = self.preview.colocalization.nuclei
+                rows = table[table.nucleus_label == self.selected]
+                if len(rows):
+                    r = rows.iloc[0]
+                    lines.append(f'Colocalization: {int(r.pair_count)} relationships · '
+                                 f'A {int(r.A_colocalized_foci)}/{int(r.A_total_foci)} · '
+                                 f'B {int(r.B_colocalized_foci)}/{int(r.B_total_foci)}')
+                    coefficient = lambda field: (f'{r[field]:.4g}' if np.isfinite(r[field]) else
+                                                  f'undefined ({r[field+"_status"].replace("_", " ")})')
+                    lines.append(f'Pearson raw / corrected: {coefficient("pearson_raw")} / {coefficient("pearson_corrected")}')
+                    value_text = lambda key: f'{r[key]:.3g}' if np.isfinite(r[key]) else 'undefined'
+                    for role in ('A', 'B'):
+                        lines.append(f'{role}: mean partners (all / associated) '
+                                     f'{value_text(role+"_mean_partner_count_all")} / '
+                                     f'{value_text(role+"_mean_partner_count_colocalized")}; '
+                                     f'mean coverage {value_text(role+"_mean_coverage_fraction_colocalized")}')
             self.nucleus_info.setText('\n'.join(lines))
         self.draw()
 
@@ -1269,6 +1352,12 @@ class OrionWindow(QMainWindow):
             output = Path(directory if directory and not isinstance(directory, bool) else self.output_dir.text()).expanduser().resolve()
             frame = pd.read_csv(output / 'Results' / 'Cell_Summary.csv')
             parameters = json.loads((output / 'Methods' / 'Effective_Parameters.json').read_text(encoding='utf-8'))
+            if parameters.get('colocalization', {}).get('enabled', False):
+                coloc = pd.read_csv(output / 'Results' / 'Colocalization_Nuclei.csv')
+                columns = ['nucleus_id'] + [c for c in coloc if c not in {
+                    'image_id', 'image_name', 'treatment_group', 'group_names', 'replicate_id', 'nucleus_id', 'nucleus_label'}]
+                coloc = coloc[columns].rename(columns={c: f'coloc_{c}' for c in columns if c != 'nucleus_id'})
+                frame = frame.merge(coloc, on='nucleus_id', how='left', validate='one_to_one')
             channels = ', '.join(f'Channel {c}' for c in parameters['foci_channels'])
             self.show_table(frame, f'Saved run · {output.name} · nuclear Channel {parameters["nuclear_channel"]} · foci {channels}', 'saved')
             self.run_output = output

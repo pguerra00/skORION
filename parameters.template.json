@@ -6,6 +6,11 @@
     2,
     3
   ],
+  "colocalization": {
+    "enabled": false,
+    "channels": [2, 3],
+    "minimum_overlap_pixels": 1
+  },
   "channels": {
     "1": "Channel 1",
     "2": "Channel 2",

@@ -22,6 +22,7 @@ from skimage import measure, morphology, segmentation
 import tifffile
 from image_io import read_image, inspect_image, validate_rgb_channel_order, validate_pixel_size
 from progress_reporting import add_progress_argument, ProgressReporter
+from colocalization import calculate as calculate_colocalization, settings as colocalization_settings, save_tables as save_colocalization_tables, VERSION as COLOCALIZATION_VERSION
 
 
 def mad(a):
@@ -401,6 +402,7 @@ def main():
     p=json.loads(parameter_bytes)
     try:
         nuclear_channel,foci_channels=select_channels(p,args.nuclear_channel,args.foci_channels)
+        p['colocalization']=colocalization_settings(p,foci_channels)
         validate_nuclear_threshold_range(p['nuclear'])
         validate_group_names(p.get('group_names',[]))
         p['rgb_channel_order']=validate_rgb_channel_order(args.rgb_channel_order if args.rgb_channel_order is not None else p.get('rgb_channel_order'))
@@ -439,10 +441,12 @@ def main():
     (out/'Methods'/'parameters.json').write_bytes(parameter_bytes)
     (out/'Methods'/'Effective_Parameters.json').write_text(json.dumps(p,indent=2), encoding='utf-8')
     print(f'Analysis output: {out}',flush=True)
-    units_per_image=1+len(foci_channels)
+    coloc_enabled=p['colocalization']['enabled']
+    units_per_image=1+len(foci_channels)+int(coloc_enabled)
     progress=ProgressReporter('analysis',len(files)*units_per_image+1,args.progress_json)
     progress.update(0,'Preparing analysis',force=True)
     mapping=[];cells=[];foci=[];nucaudit=[];focaudit=[];qc=[];intensity=[];sensitivity=[];metadata={};thresholds=[]
+    colocalization_results=[]
     for idx,path in enumerate(files,1):
         print(f'\nAnalyzing image {idx}/{len(files)}: {path.name}',flush=True)
         arr,md=read_image(path,p);m=metadata_row(path,idx,md,p.get('group_names'));mapping.append(m);metadata[m['image_id']]=md
@@ -485,6 +489,7 @@ def main():
                      'saturated_pixel_pct':float((a==saturation_value).mean()*100)}
             for q in [0,1,10,25,50,75,90,95,99,99.5,99.9,100]:histrow[f'p{q}_adu']=float(np.percentile(a,q))
             intensity.append(histrow)
+        coloc_masks={};coloc_backgrounds={};coloc_foci=[]
         for channel_index,c in enumerate(foci_channels):
             raw=arr[c-1].astype(float)
             sm=ndi.gaussian_filter(raw,p['foci']['gaussian_sigma_px'],mode='reflect')
@@ -528,6 +533,10 @@ def main():
                 progress.update(channel_base+(1+nucleus_index)/channel_steps,
                                 f'Image {idx}/{len(files)} · {path.name} · Channel {c} · nucleus {nucleus_index}/{len(accepted)}')
             save_mask(out/'Masks'/f"{m['image_id']}_C{c}_foci.tif",output_mask,sx,sy)
+            if coloc_enabled and c in p['colocalization']['channels']:
+                coloc_masks[c]=output_mask
+                coloc_backgrounds[c]=bg.astype(np.float32)
+                coloc_foci.extend(imagef)
             cs=list(cell_index.values());faimage=focaudit[audit_start:]
             counts=np.array([r[f'C{c}_foci_count'] for r in cs])
             ff=pd.DataFrame(imagef)
@@ -556,8 +565,12 @@ def main():
             qc.append(qr)
             print(' ',c,len(imagef),'foci;',sens_counts,'threshold sensitivity',flush=True)
             # Reserve the final image checkpoint until its raw checksum passes.
-            if channel_index<len(foci_channels)-1:
+            if channel_index<len(foci_channels)-1 or coloc_enabled:
                 progress.update(channel_base+1,f'Image {idx}/{len(files)} · {path.name} · Channel {c} · foci mask saved',force=True)
+        if coloc_enabled:
+            colocalization_results.append(calculate_colocalization(
+                arr,usable,coloc_masks,coloc_backgrounds,coloc_foci,p,sx,sy,ids))
+            del coloc_masks,coloc_backgrounds,coloc_foci
         cells.extend(cell_index.values())
         if hashlib.sha256(path.read_bytes()).hexdigest()!=m['sha256']:raise RuntimeError('Raw image changed during analysis')
         progress.update(idx*units_per_image,f'Image {idx}/{len(files)} · {path.name} · masks and measurements complete',force=True)
@@ -631,6 +644,7 @@ def main():
     dff=dff[first+[c for c in dff if c not in first]]
     tables={'Image_Summary':pd.DataFrame(image_rows),'Cell_Summary':dfc,'Focus_Data':dff,'QC_Summary':dfq}
     for name,df in tables.items():df.to_csv(out/'Results'/f'{name}.csv',index=False,float_format='%.10g')
+    if coloc_enabled:save_colocalization_tables(out,colocalization_results)
     dfq.to_csv(out/'QC'/'QC_Summary.csv',index=False,float_format='%.10g')
     pd.DataFrame(mapping).to_csv(out/'Methods'/'Treatment_Group_Mapping.csv',index=False)
     pd.DataFrame(intensity).to_csv(out/'QC'/'Input_Intensity_Distributions.csv',index=False,float_format='%.10g')
@@ -650,6 +664,10 @@ def main():
          'nuclear_channel':nuclear_channel,'foci_channels':foci_channels,'qc_output':args.qc_output,
          'rgb_channel_order':p.get('rgb_channel_order'),
          'pixel_size_um':p.get('pixel_size_um'),
+         'colocalization':p['colocalization'],
+         **({'colocalization_version':COLOCALIZATION_VERSION,
+             'colocalization_source_sha256':hashlib.sha256(Path(__file__).with_name('colocalization.py').read_bytes()).hexdigest()}
+            if coloc_enabled else {}),
          'image_reader_sha256':hashlib.sha256(Path(__file__).with_name('image_io.py').read_bytes()).hexdigest(),
          **{f'channel_{c}_foci':int((dff.channel==c).sum()) for c in foci_channels},
          'raw_sha256_rechecked_unchanged':True,'parameters_sha256':hashlib.sha256(parameter_bytes).hexdigest(),

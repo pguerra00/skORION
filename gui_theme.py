@@ -68,14 +68,14 @@ def stylesheet():
         QGroupBox::title {{ subcontrol-origin: margin; left: 12px; top: 3px;
                            padding: 0 6px; color: {t.gold};
                            font-family: "{t.heading_font}"; font-size: 13px; }}
-        QLineEdit, QComboBox, QDoubleSpinBox {{
+        QLineEdit, QComboBox, QDoubleSpinBox, QSpinBox {{
             color: {t.foreground}; background: {t.inset};
             border: 0; border-bottom: 1px solid {t.brass}; border-radius: 0;
             min-height: 30px; padding: 6px 7px;
             selection-background-color: {t.midnight}; selection-color: {t.foreground}; }}
-        QLineEdit:focus, QComboBox:focus, QDoubleSpinBox:focus {{
+        QLineEdit:focus, QComboBox:focus, QDoubleSpinBox:focus, QSpinBox:focus {{
             border-bottom: 2px solid {t.gold_light}; background: {t.focus_background}; }}
-        QLineEdit:disabled, QComboBox:disabled, QDoubleSpinBox:disabled {{
+        QLineEdit:disabled, QComboBox:disabled, QDoubleSpinBox:disabled, QSpinBox:disabled {{
             color: {t.disabled}; border-bottom-color: {t.disabled_border}; background: {t.inset}; }}
         QLineEdit:read-only {{ color: {t.muted}; }}
         QComboBox {{ padding-right: 25px; }}
@@ -84,7 +84,7 @@ def stylesheet():
         QComboBox QAbstractItemView {{ background: {t.panel}; color: {t.foreground};
             border: 1px solid {t.brass}; selection-background-color: {t.midnight};
             selection-color: {t.foreground}; padding: 4px; }}
-        QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{
+        QDoubleSpinBox::up-button, QDoubleSpinBox::down-button, QSpinBox::up-button, QSpinBox::down-button {{
             background: {t.panel}; border: 0; width: 20px; }}
         QPushButton {{ color: {t.gold}; background: transparent; border: 1px solid {t.brass};
             border-radius: 0; min-height: 34px; padding: 6px 10px; }}
