@@ -10,8 +10,8 @@ import sys
 import tempfile
 
 try:
-    from PySide6.QtCore import Qt, QProcess, QSize, QThread, QTimer, Signal, QUrl
-    from PySide6.QtGui import QColor, QDesktopServices, QFontDatabase, QIcon, QImage, QPainter, QPixmap
+    from PySide6.QtCore import Qt, QElapsedTimer, QProcess, QSize, QThread, QTimer, Signal, QUrl
+    from PySide6.QtGui import QColor, QDesktopServices, QIcon, QImage, QPainter, QPixmap
     from PySide6.QtWidgets import (
         QApplication, QAbstractItemView, QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox,
         QFileDialog, QFormLayout, QGraphicsScene, QGraphicsView, QGridLayout, QGroupBox,
@@ -31,8 +31,8 @@ try:
     from image_io import inspect_image
     from gui_identity import apply_application_identity, prepare_taskbar
     from progress_reporting import ProgressStream, RunProgress, STAGE_LABELS
-    from gui_theme import (APP_STYLE, TOKENS, DecoForm, DecoHeader, DecoImageFrame, DecoInspectionDock,
-                           DecoPanel, DecoSurface, apply_theme, button_variant,
+    from gui_theme import (APP_STYLE, TOKENS, DecoFlowLayout, DecoForm, DecoHeader, DecoImageFrame, DecoInspectionDock,
+                           DecoPanel, DecoSplitterGrip, DecoSurface, apply_log_font, apply_theme, button_variant,
                            layout_metrics, text_label, tracked_font)
 except ImportError as exc:
     raise SystemExit('Analysis dependencies are missing. Using Python 3.12, install '
@@ -40,7 +40,7 @@ except ImportError as exc:
 
 ROOT = Path(__file__).resolve().parent
 BASIC_KEYS = {'group_names', 'nuclear_channel', 'foci_channels', 'nuclear.fixed_threshold_adu',
-              'qc_output', 'rgb_channel_order', 'gui_display', 'colocalization'}
+              'qc_output', 'rgb_channel_order', 'gui_display', 'colocalization', 'channels'}
 # These strings describe fixed algorithms; editing them would not change execution.
 METHOD_KEYS = {
     'analysis_version', 'input_axis_order', 'analysis_unit', 'statistical_testing',
@@ -56,11 +56,43 @@ def label_for(key):
     return text[:1].upper() + text[1:]
 
 
+def format_elapsed(milliseconds):
+    seconds = max(0, int(milliseconds) // 1000)
+    hours, seconds = divmod(seconds, 3600)
+    minutes, seconds = divmod(seconds, 60)
+    return f'{hours:02d}:{minutes:02d}:{seconds:02d}'
+
+
 def set_path(parameters, path, value):
     obj = parameters
     for key in path[:-1]:
         obj = obj[key]
     obj[path[-1]] = value
+
+
+class FloorSpinBox(QDoubleSpinBox):
+    """Tenths for editing, without rounding untouched imported thresholds."""
+    def __init__(self,value=0):
+        super().__init__()
+        self.setDecimals(1)
+        self.setRange(0,1e12)
+        self.setSingleStep(.1)
+        self.setValue(value)
+        self.original_value=value
+        self.edited=False
+        self.setKeyboardTracking(False)
+        self.setMinimumWidth(70)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored,QSizePolicy.Policy.Fixed)
+        self.valueChanged.connect(self.mark_edited)
+        self.lineEdit().textEdited.connect(self.mark_edited)
+
+    def mark_edited(self,*_):
+        self.edited=True
+
+    def effective_value(self):
+        if not self.edited:return self.original_value
+        self.interpretText()
+        return self.value()
 
 
 class ParameterEditor(QTreeWidget):
@@ -141,6 +173,7 @@ class ImageView(QGraphicsView):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
         self.setMinimumSize(240, 200)
         self.setAccessibleName('Image viewer: wheel to zoom, drag to pan, click to inspect a nucleus')
         self.pixmap = None
@@ -164,7 +197,7 @@ class ImageView(QGraphicsView):
         painter.setFont(font)
         painter.setPen(QColor(TOKENS.muted))
         painter.drawText(bounds.adjusted(12, 35, -12, 35), Qt.AlignmentFlag.AlignCenter,
-                         'Load TIFF images to begin')
+                         'Preview an image to begin')
         painter.restore()
 
     def show_rgb(self, rgb, metadata, fit=False):
@@ -248,8 +281,18 @@ class OrionWindow(QMainWindow):
         self.run_output = None
         self.table_origin = None
         self.layer_checks = {}
+        self.raw_checks = {}
+        self.raw_selection = None
         self.signal_colors, self.outline_colors, self.color_buttons = {}, {}, {}
+        self.signal_auto, self.outline_auto, self.nonnuclear_names = {}, {}, {}
         self.foci_checks, self.floors = {}, {}
+        self.floor_labels = {}
+        self.nuclear_channel = 1
+        self.channel_names, self.nuclear_checks = {}, {}
+        self.rgb_colors, self.rgb_fields = [], {}
+        self.channel_notices = {}
+        self.sidebar_collapsed = self.console_collapsed = False
+        self.sidebar_width, self.console_height = 360, 200
         self.process = QProcess(self)
         self.process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
         self.process.readyReadStandardOutput.connect(self.read_process_output)
@@ -261,6 +304,10 @@ class OrionWindow(QMainWindow):
         self.preview_error = False
         self.cancel_requested = False
         self.stage = ''
+        self.analysis_clock = QElapsedTimer()
+        self.elapsed_timer = QTimer(self)
+        self.elapsed_timer.setInterval(1000)
+        self.elapsed_timer.timeout.connect(self.update_elapsed_time)
         self.build_ui()
         self.load_controls()
         if parameter_file:
@@ -276,12 +323,12 @@ class OrionWindow(QMainWindow):
         shell = DecoSurface()
         shell_layout = layout_metrics(QVBoxLayout(shell), margin=0, spacing=0)
         shell_layout.addWidget(DecoHeader())
-        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter = self.horizontal_splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setChildrenCollapsible(False)
-        splitter.setHandleWidth(1)
+        splitter.setHandleWidth(5)
         shell_layout.addWidget(splitter, 1)
         self.setCentralWidget(shell)
-        left = QWidget()
+        left = self.sidebar_panel = QWidget()
         left.setObjectName('setupColumn')
         left_layout = layout_metrics(QVBoxLayout(left))
         self.sidebar = QWidget()
@@ -300,7 +347,6 @@ class OrionWindow(QMainWindow):
         self.add_button(parameter_buttons, 'Load JSON', self.load_parameters)
         self.add_button(parameter_buttons, 'Save JSON…', self.save_parameters)
         paths.addRow(parameter_buttons)
-        self.add_button(paths, 'Load images', self.load_images)
         setup.addWidget(directories)
         basic = DecoPanel('II · Basic parameters')
         form = DecoForm(basic)
@@ -314,42 +360,32 @@ class OrionWindow(QMainWindow):
         self.rgb_enabled.setAccessibleName('Enable RGB TIFF channel mapping')
         self.rgb_enabled.setToolTip('Required only for RGB TIFF exports. Channel stacks keep their original channel order.')
         form.addRow(self.rgb_enabled)
-        self.rgb_container = QWidget()
-        rgb_form = DecoForm(self.rgb_container)
-        rgb_form.setContentsMargins(0, 0, 0, 0)
-        self.rgb_colors = []
-        for channel in range(1, 4):
-            color = QComboBox()
-            color.addItem('Choose color…', None)
-            for name in ('Red', 'Green', 'Blue'):
-                color.addItem(name, name.lower())
-            color.setAccessibleName(f'Channel {channel} RGB color')
-            color.currentIndexChanged.connect(self.rgb_changed)
-            rgb_form.addRow(f'Channel {channel}', color)
-            self.rgb_colors.append(color)
-        self.rgb_help = text_label('For RGB exports, assign red, green, and blue once each. '
-                          'Choose nuclear and foci roles independently. '
-                          'For example: Channel 1 = Blue, Channel 2 = Green, Channel 3 = Red. '
-                          'Channel stacks use their original channel order.')
-        form.addRow(self.rgb_container)
+        self.channel_container = QWidget()
+        self.channel_layout = QVBoxLayout(self.channel_container)
+        self.channel_layout.setContentsMargins(0, 0, 0, 0)
+        self.channel_layout.setSpacing(TOKENS.space)
+        form.addRow(self.channel_container)
+        self.rgb_help = text_label('RGB source colors: the nuclear channel uses Blue. '
+                                  'Choose Red and Green for the other channels. Changing the '
+                                  'nuclear channel swaps source colors. Display colors stay separate.')
         form.addRow(self.rgb_help)
         self.rgb_enabled.toggled.connect(self.rgb_changed)
-        self.nuclear = QComboBox()
-        self.nuclear.currentIndexChanged.connect(self.channel_changed)
-        form.addRow('Nuclear channel', self.nuclear)
-        self.foci_container = QWidget()
-        self.foci_layout = QVBoxLayout(self.foci_container)
-        self.foci_layout.setContentsMargins(0, 0, 0, 0)
-        form.addRow('Foci channels', self.foci_container)
+        self.channel_notice = text_label('')
+        self.channel_notice.hide()
+        form.addRow(self.channel_notice)
+        self.coloc_box = DecoPanel('Colocalization')
+        coloc_box_form = DecoForm(self.coloc_box)
         self.coloc_enabled = QCheckBox('Analyze colocalization')
         self.coloc_enabled.setAccessibleName('Analyze colocalization')
-        form.addRow(self.coloc_enabled)
+        coloc_box_form.addRow(self.coloc_enabled)
         self.coloc_container = QWidget()
         coloc_form = DecoForm(self.coloc_container)
         coloc_form.setContentsMargins(0, 0, 0, 0)
         self.coloc_a, self.coloc_b = QComboBox(), QComboBox()
         for name, combo in [('Marker A channel', self.coloc_a), ('Marker B channel', self.coloc_b)]:
             combo.setAccessibleName(name)
+            combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            combo.setMinimumContentsLength(12)
             combo.currentIndexChanged.connect(self.invalidate_preview)
             coloc_form.addRow(name, combo)
         self.coloc_minimum = QSpinBox()
@@ -360,8 +396,8 @@ class OrionWindow(QMainWindow):
         coloc_form.addRow('Minimum shared pixels', self.coloc_minimum)
         coloc_form.addRow(text_label('Shared pixels establish an association. All qualifying partners are retained. '
                                      'In the Colocalization view, bright objects have partners; dim objects do not. Yellow marks qualifying shared pixels.'))
-        form.addRow(self.coloc_container)
-        self.coloc_container.hide()
+        coloc_box_form.addRow(self.coloc_container)
+        form.addRow(self.coloc_box)
         self.coloc_enabled.toggled.connect(self.colocalization_changed)
         self.threshold = QComboBox()
         self.threshold.addItems(['Automatic · median / MAD', 'Manual · ADU range'])
@@ -409,30 +445,32 @@ class OrionWindow(QMainWindow):
         scroll.setWidget(self.sidebar)
         scroll.setMinimumWidth(340)
         left_layout.addWidget(scroll)
-        actions = QGridLayout()
-        actions.setSpacing(TOKENS.gap)
         self.run_button = button_variant(QPushButton('Run analysis'), 'primary')
         self.run_button.clicked.connect(self.start_analysis)
         self.stop_button = button_variant(QPushButton('Stop'), 'quiet')
         self.stop_button.clicked.connect(self.stop_analysis)
         self.preview_button = button_variant(QPushButton('Preview image'))
         self.preview_button.clicked.connect(self.start_preview)
-        actions.addWidget(self.run_button, 0, 0)
-        actions.addWidget(self.stop_button, 0, 1)
-        actions.addWidget(self.preview_button, 1, 0, 1, 2)
-        actions.setColumnStretch(0, 1)
         self.stop_button.setEnabled(False)
-        left_layout.addLayout(actions)
         splitter.addWidget(left)
         workspace = DecoSurface(patterned=True)
         layout = layout_metrics(QVBoxLayout(workspace))
         workspace_title = QHBoxLayout()
+        self.sidebar_toggle = self.panel_toggle('Hide settings panel', Qt.ArrowType.LeftArrow, splitter, shell)
+        self.sidebar_toggle.clicked.connect(lambda: self.set_sidebar_collapsed(not self.sidebar_collapsed))
         workspace_title.addWidget(text_label('Observation room', 'heading'))
         workspace_title.addStretch()
-        self.image_info = text_label('Load TIFF images to begin', 'metadata')
+        self.image_info = text_label('Preview an image to begin', 'metadata')
         self.image_info.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         workspace_title.addWidget(self.image_info)
         layout.addLayout(workspace_title)
+        self.vertical_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.vertical_splitter.setChildrenCollapsible(False)
+        self.vertical_splitter.setHandleWidth(5)
+        layout.addWidget(self.vertical_splitter, 1)
+        self.viewer_pane = QWidget()
+        viewer_layout = layout_metrics(QVBoxLayout(self.viewer_pane), margin=0, spacing=TOKENS.gap // 2)
+        self.vertical_splitter.addWidget(self.viewer_pane)
         image_row = QHBoxLayout()
         image_label = text_label('Image', 'fieldLabel')
         image_row.addWidget(image_label)
@@ -444,7 +482,7 @@ class OrionWindow(QMainWindow):
         button_variant(self.add_button(image_row, '−', lambda: self.viewer.scale(1 / 1.25, 1 / 1.25)), 'tool').setAccessibleName('Zoom out')
         button_variant(self.add_button(image_row, 'Fit', lambda: self.viewer.fit()), 'tool')
         button_variant(self.add_button(image_row, '+', lambda: self.viewer.scale(1.25, 1.25)), 'tool').setAccessibleName('Zoom in')
-        layout.addLayout(image_row)
+        viewer_layout.addLayout(image_row)
         self.view_tabs = QTabBar()
         for name in ('Raw image', 'Nuclei', 'Foci', 'Overlay'):
             self.view_tabs.addTab(name)
@@ -453,26 +491,16 @@ class OrionWindow(QMainWindow):
         self.view_tabs.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         tracked_font(self.view_tabs, .7)
         self.view_tabs.currentChanged.connect(self.draw)
-        layout.addWidget(self.view_tabs)
+        viewer_layout.addWidget(self.view_tabs)
         self.raw_controls = QWidget()
-        view_row = layout_metrics(QHBoxLayout(self.raw_controls), margin=0)
-        raw_label = text_label('Display channel', 'fieldLabel')
-        view_row.addWidget(raw_label)
-        self.raw_channel = QComboBox()
-        self.raw_channel.setAccessibleName('Display channel')
-        self.raw_channel.setEnabled(False)
-        self.raw_channel.currentIndexChanged.connect(self.draw)
-        raw_label.setBuddy(self.raw_channel)
-        view_row.addWidget(self.raw_channel)
-        view_row.addStretch()
+        self.raw_layout = DecoFlowLayout(self.raw_controls)
         self.raw_controls.hide()
-        layout.addWidget(self.raw_controls)
+        viewer_layout.addWidget(self.raw_controls)
         self.viewer = ImageView()
         self.viewer.picked.connect(self.pick_nucleus)
-        layout.addWidget(DecoImageFrame(self.viewer), 1)
+        viewer_layout.addWidget(DecoImageFrame(self.viewer), 1)
         self.layers = QWidget()
-        self.layers_layout = QHBoxLayout(self.layers)
-        self.layers_layout.setContentsMargins(0, 0, 0, 0)
+        self.layers_layout = DecoFlowLayout(self.layers)
         self.colors_toggle = QToolButton()
         self.colors_toggle.setText('Channel colors')
         self.colors_toggle.setCheckable(True)
@@ -481,7 +509,7 @@ class OrionWindow(QMainWindow):
         layer_row = QHBoxLayout()
         layer_row.addWidget(self.layers, 1)
         layer_row.addWidget(self.colors_toggle)
-        layout.addLayout(layer_row)
+        viewer_layout.addLayout(layer_row)
         self.colors_panel = QWidget()
         self.colors_layout = QGridLayout(self.colors_panel)
         self.colors_layout.setContentsMargins(0, 0, 0, 0)
@@ -492,7 +520,6 @@ class OrionWindow(QMainWindow):
         dock_layout.addWidget(self.colors_panel)
         self.inspection_dock = DecoInspectionDock(dock)
         self.tabs = QTabWidget()
-        self.tabs.setMaximumHeight(200)
         self.inspector = QWidget()
         inspection = QVBoxLayout(self.inspector)
         picker = QHBoxLayout()
@@ -526,13 +553,22 @@ class OrionWindow(QMainWindow):
         self.tabs.addTab(results, 'Results')
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
-        self.log.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont))
+        apply_log_font(self.log)
         self.log.setMaximumBlockCount(10000)
         self.tabs.addTab(self.log, 'Analysis log')
-        dock_layout.addWidget(self.tabs)
-        layout.addWidget(self.inspection_dock)
-        bottom = QHBoxLayout()
-        progress_rows = QVBoxLayout()
+        dock_layout.addWidget(self.tabs, 1)
+        self.console_panel = self.inspection_dock
+        self.console_toggle = self.panel_toggle('Hide console', Qt.ArrowType.DownArrow, self.vertical_splitter, shell)
+        self.console_toggle.clicked.connect(lambda: self.set_console_collapsed(not self.console_collapsed))
+        self.vertical_splitter.addWidget(self.console_panel)
+        self.vertical_splitter.setStretchFactor(0, 1)
+        self.vertical_splitter.setStretchFactor(1, 0)
+        self.vertical_splitter.setSizes([600, self.console_height])
+        self.footer = QWidget()
+        bottom = layout_metrics(DecoFlowLayout(self.footer))
+        self.progress_panel = QWidget()
+        progress_rows = QVBoxLayout(self.progress_panel)
+        progress_rows.setContentsMargins(0, 0, 0, 0)
         progress_rows.setSpacing(4)
         self.progress = QProgressBar()
         self.stage_progress = QProgressBar()
@@ -561,16 +597,95 @@ class OrionWindow(QMainWindow):
             progress_rows.addLayout(row)
         self.progress.setAccessibleName('Overall analysis progress')
         self.stage_progress.setAccessibleName('Current stage progress')
-        bottom.addLayout(progress_rows, 1)
-        button_variant(self.add_button(bottom, 'Load saved results', self.load_saved_results), 'quiet')
+        self.progress_panel.setMinimumWidth(260)
+        bottom.addWidget(self.progress_panel)
+        self.elapsed_label = text_label('Elapsed 00:00:00', 'metadata')
+        self.elapsed_label.setWordWrap(False)
+        self.elapsed_label.setMinimumWidth(TOKENS.space * 11)
+        self.elapsed_label.setAccessibleName('Elapsed analysis time')
+        bottom.addWidget(self.elapsed_label)
+        bottom.addWidget(self.run_button)
+        bottom.addWidget(self.preview_button)
+        bottom.addWidget(self.stop_button)
+        self.results_button = button_variant(self.add_button(bottom, 'Load saved results', self.load_saved_results), 'quiet')
         self.report_button = button_variant(self.add_button(bottom, 'Open report', self.open_report), 'quiet')
         self.report_button.setEnabled(False)
-        layout.addLayout(bottom)
+        shell_layout.addWidget(self.footer)
         splitter.addWidget(workspace)
         splitter.setSizes([360, 960])
         splitter.setStretchFactor(1, 1)
+        splitter.splitterMoved.connect(self.remember_sidebar_size)
+        self.vertical_splitter.splitterMoved.connect(self.remember_console_size)
         self.statusBar().showMessage('Ready · previews do not write output files')
         self.input_dir.textChanged.connect(self.input_changed)
+
+    @staticmethod
+    def panel_toggle(name, arrow, splitter, shell):
+        button = DecoSplitterGrip(splitter, shell)
+        button.setArrowType(arrow)
+        button.setCheckable(True)
+        button.setChecked(True)
+        button.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        button.setAccessibleName(name)
+        button.setToolTip(name)
+        return button
+
+    @staticmethod
+    def update_panel_toggle(button, expanded, name, arrow):
+        button.setChecked(expanded)
+        button.setArrowType(arrow)
+        button.setAccessibleName(name)
+        button.setToolTip(name)
+
+    def remember_sidebar_size(self, *_):
+        if not self.sidebar_collapsed:
+            self.sidebar_width = self.horizontal_splitter.sizes()[0]
+
+    def remember_console_size(self, *_):
+        if not self.console_collapsed:
+            self.console_height = self.vertical_splitter.sizes()[1]
+
+    def set_sidebar_collapsed(self, collapsed):
+        if self.sidebar_collapsed == collapsed:
+            return
+        if collapsed:
+            self.remember_sidebar_size()
+            focus = QApplication.focusWidget()
+            if focus is not None and (focus is self.sidebar_panel or self.sidebar_panel.isAncestorOf(focus)):
+                self.sidebar_toggle.setFocus(Qt.FocusReason.OtherFocusReason)
+        self.sidebar_collapsed = collapsed
+        self.sidebar_toggle.setExpanded(not collapsed)
+        self.sidebar_panel.setVisible(not collapsed)
+        if not collapsed:
+            total = self.horizontal_splitter.width() - self.horizontal_splitter.handleWidth()
+            workspace = self.horizontal_splitter.widget(1)
+            available = total - workspace.minimumSizeHint().width()
+            width = min(self.sidebar_width, available)
+            self.horizontal_splitter.setSizes([max(0, width), max(0, total - width)])
+        self.update_panel_toggle(self.sidebar_toggle, not collapsed,
+                                 'Show settings panel' if collapsed else 'Hide settings panel',
+                                 Qt.ArrowType.RightArrow if collapsed else Qt.ArrowType.LeftArrow)
+
+    def set_console_collapsed(self, collapsed):
+        if self.console_collapsed == collapsed:
+            return
+        if collapsed:
+            self.remember_console_size()
+            focus = QApplication.focusWidget()
+            if focus is not None and (focus is self.console_panel or self.console_panel.isAncestorOf(focus)):
+                self.console_toggle.setFocus(Qt.FocusReason.OtherFocusReason)
+        self.console_collapsed = collapsed
+        self.console_toggle.setExpanded(not collapsed)
+        self.console_panel.setVisible(not collapsed)
+        if not collapsed:
+            total = self.vertical_splitter.height() - self.vertical_splitter.handleWidth()
+            available = total - self.viewer_pane.minimumSizeHint().height()
+            height = min(self.console_height, available)
+            self.vertical_splitter.setSizes([max(0, total - height), max(0, height)])
+        self.vertical_splitter.handle(1).setEnabled(not collapsed)
+        self.update_panel_toggle(self.console_toggle, not collapsed,
+                                 'Show console' if collapsed else 'Hide console',
+                                 Qt.ArrowType.UpArrow if collapsed else Qt.ArrowType.DownArrow)
 
     @staticmethod
     def add_button(layout, text, callback):
@@ -633,17 +748,21 @@ class OrionWindow(QMainWindow):
 
     def load_controls(self):
         p = self.parameters
+        self.channel_notices = {}
+        self.channel_notice.hide()
         self.signal_colors, self.outline_colors = self.read_display_colors(p)
+        display = p.get('gui_display', {}).get('channels', {})
+        self.signal_auto = {int(c): values.get('signal_auto', False) if 'signal' in values else True
+                            for c, values in display.items()}
+        self.outline_auto = {int(c): values.get('outline_auto', False) if 'outline' in values else True
+                             for c, values in display.items()}
+        self.nonnuclear_names = {int(c): values['nonnuclear_name'] for c, values in display.items()
+                                if 'nonnuclear_name' in values}
         self.groups.setText(', '.join(p.get('group_names', [])))
         order = p.get('rgb_channel_order')
         self.rgb_enabled.blockSignals(True)
         self.rgb_enabled.setChecked(order is not None)
         self.rgb_enabled.blockSignals(False)
-        for index, color in enumerate(self.rgb_colors):
-            color.blockSignals(True)
-            color.setCurrentIndex(color.findData(order[index] if order else None))
-            color.blockSignals(False)
-        self.sync_rgb_controls()
         bounds = p['nuclear'].get('fixed_threshold_adu')
         self.threshold.blockSignals(True)
         self.threshold.setCurrentIndex(0 if bounds is None else 1)
@@ -657,10 +776,10 @@ class OrionWindow(QMainWindow):
         self.threshold_changed(invalidate=False)
         self.qc_mode.setCurrentText(p.get('qc_output', 'minimal'))
         count = max(3, p.get('nuclear_channel', 1), *p.get('foci_channels', [2, 3]),
-                    *self.signal_colors, *self.outline_colors,
+                    *self.signal_colors, *self.outline_colors, *self.signal_auto, *self.nonnuclear_names,
                     *[int(k) for k in p.get('channels', {}) if k.isdecimal()],
                     *[int(k[8:]) for k in p['foci'] if k.startswith('channel_') and k[8:].isdecimal()])
-        self.build_channels(count)
+        self.build_channels(count, rgb_order=order or [None, None, None])
         coloc = p.get('colocalization', {})
         self.sync_colocalization_channels(coloc.get('channels', [2, 3]))
         self.coloc_minimum.setValue(coloc.get('minimum_overlap_pixels', 1))
@@ -670,26 +789,85 @@ class OrionWindow(QMainWindow):
         self.colocalization_changed(invalidate=False)
         self.advanced.load(p)
 
-    def build_channels(self, count):
+    def build_channels(self, count, rgb_order=None):
         p = self.parameters
-        self.nuclear.blockSignals(True)
-        self.nuclear.clear()
-        self.clear_layout(self.foci_layout)
+        if rgb_order is None:
+            rgb_order = [color.currentData() for color in self.rgb_colors] or [None, None, None]
+        self.nuclear_channel = p['nuclear_channel']
+        self.clear_layout(self.channel_layout)
         self.clear_layout(self.floor_layout)
         self.foci_checks, self.floors = {}, {}
+        self.floor_labels = {}
+        self.channel_names, self.nuclear_checks = {}, {}
+        self.rgb_colors, self.rgb_fields = [], {}
         for channel in range(1, count + 1):
-            self.nuclear.addItem(f'Channel {channel}', channel)
-            check = QCheckBox(f'Channel {channel}')
-            check.setChecked(channel in p['foci_channels'])
+            row = QWidget()
+            grid = QGridLayout(row)
+            grid.setContentsMargins(0, 0, 0, 0)
+            grid.setHorizontalSpacing(TOKENS.gap)
+            grid.setVerticalSpacing(TOKENS.gap)
+            label = QLabel(f'Channel {channel}')
+            grid.addWidget(label, 0, 0, 1, 3)
+            name = QLineEdit(p.get('channels', {}).get(str(channel), f'Channel {channel}'))
+            previous_name = name.text().strip() or f'Channel {channel}'
+            if channel == self.nuclear_channel:
+                if previous_name != 'Nucleus':
+                    self.nonnuclear_names[channel] = previous_name
+                else:
+                    self.nonnuclear_names.setdefault(channel, f'Channel {channel}')
+                name.setText('Nucleus')
+            else:
+                self.nonnuclear_names[channel] = previous_name
+            name.setPlaceholderText(f'Channel {channel}')
+            name.setAccessibleName(f'Channel {channel} name')
+            name.setToolTip('The nuclear channel is named Nucleus. Its previous marker name returns when the role moves.')
+            name.setMinimumWidth(0)
+            name.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+            label.setBuddy(name)
+            grid.addWidget(name, 1, 0)
+            self.channel_names[channel] = name
+            check = QCheckBox('Foci')
+            check.setAccessibleName(f'Channel {channel} foci role')
+            check.setChecked(channel in p['foci_channels'] and channel != self.nuclear_channel)
             check.toggled.connect(self.channel_changed)
-            self.foci_layout.addWidget(check)
+            grid.addWidget(check, 1, 1)
             self.foci_checks[channel] = check
+            nuclear = QCheckBox('Nuclear')
+            nuclear.setAccessibleName(f'Channel {channel} nuclear role')
+            nuclear.setChecked(channel == self.nuclear_channel)
+            nuclear.toggled.connect(lambda checked, c=channel: self.nuclear_changed(c, checked))
+            grid.addWidget(nuclear, 1, 2)
+            self.nuclear_checks[channel] = nuclear
+            grid.setColumnStretch(0, 1)
+            if channel <= 3:
+                rgb = QWidget()
+                rgb_layout = QHBoxLayout(rgb)
+                rgb_layout.setContentsMargins(0, 0, 0, 0)
+                rgb_label = QLabel('RGB source')
+                rgb_layout.addWidget(rgb_label)
+                color = QComboBox()
+                color.addItem('Choose color…', None)
+                for value in ('Red', 'Green', 'Blue'):
+                    color.addItem(value, value.lower())
+                color.setAccessibleName(f'Channel {channel} RGB source color')
+                rgb_label.setBuddy(color)
+                color.setCurrentIndex(color.findData(rgb_order[channel - 1]))
+                color.currentIndexChanged.connect(self.rgb_changed)
+                rgb_layout.addWidget(color, 1)
+                grid.addWidget(rgb, 2, 0, 1, 3)
+                self.rgb_colors.append(color)
+                self.rgb_fields[channel] = rgb
+            self.channel_layout.addWidget(row)
+            name.textChanged.connect(lambda _, c=channel: self.channel_name_changed(c))
             box = DecoPanel(f'Channel {channel} · foci ADU floors')
             form = DecoForm(box)
+            marker = text_label('', 'metadata')
+            form.addRow(marker)
+            self.floor_labels[channel] = marker
             values = p['foci'].get(f'channel_{channel}', {})
             controls = {}
             for key in FLOOR_KEYS:
-                spin = self.number(values.get(key, 0))
+                spin = FloorSpinBox(values.get(key, 0))
                 spin.setAccessibleName(f'Channel {channel} {label_for(key)}')
                 spin.valueChanged.connect(self.invalidate_preview)
                 form.addRow(label_for(key).replace(' (ADU)', '').replace(' floor', ''), spin)
@@ -697,11 +875,115 @@ class OrionWindow(QMainWindow):
             self.floor_layout.addWidget(box)
             box.setVisible(check.isChecked())
             self.floors[channel] = (box, controls)
-        self.nuclear.setCurrentIndex(self.nuclear.findData(p['nuclear_channel']))
-        self.nuclear.blockSignals(False)
+        self.sync_channel_roles()
+        if self.nuclear_channel in p['foci_channels']:
+            self.channel_message(f'Channel {self.nuclear_channel} keeps its nuclear role; its foci role was cleared.', 'roles')
+        self.sync_rgb_controls()
         self.rebuild_layers()
         self.rebuild_color_controls()
+        self.refresh_channel_labels()
+        order = [self.groups, self.rgb_enabled]
+        for channel in self.channel_names:
+            order.extend([self.channel_names[channel], self.foci_checks[channel], self.nuclear_checks[channel]])
+            if channel <= 3:
+                order.append(self.rgb_colors[channel - 1])
+        order.extend([self.coloc_enabled, self.coloc_a, self.coloc_b, self.coloc_minimum,
+                      self.threshold, self.lower, self.upper])
+        for _, controls in self.floors.values():
+            order.extend(controls.values())
+        order.extend([self.qc_mode, self.advanced_toggle])
+        for first, second in zip(order, order[1:]):
+            QWidget.setTabOrder(first, second)
+
+    def channel_label(self, channel, parameters=None):
+        base = f'Channel {channel}'
+        name = (parameters.get('channels', {}).get(str(channel), base) if parameters is not None else
+                self.channel_names[channel].text().strip() if channel in self.channel_names else base)
+        return base if not name or name == base else f'{base} · {name}'
+
+    def channel_message(self, message, kind='rgb'):
+        self.channel_notices[kind] = message
+        self.update_channel_notice()
+        self.statusBar().showMessage(message)
+
+    def update_channel_notice(self):
+        messages = [message for kind, message in self.channel_notices.items()
+                    if kind != 'rgb' or self.rgb_enabled.isChecked()]
+        self.channel_notice.setText('\n'.join(messages))
+        self.channel_notice.setVisible(bool(messages))
+
+    def sync_channel_roles(self):
+        for channel, nuclear in self.nuclear_checks.items():
+            active = channel == self.nuclear_channel
+            nuclear.blockSignals(True)
+            nuclear.setChecked(active)
+            nuclear.blockSignals(False)
+            if active:
+                self.channel_names[channel].blockSignals(True)
+                self.channel_names[channel].setText('Nucleus')
+                self.channel_names[channel].blockSignals(False)
+            self.channel_names[channel].setEnabled(not active)
+            focus = self.foci_checks[channel]
+            focus.blockSignals(True)
+            if active:
+                focus.setChecked(False)
+            focus.setEnabled(not active)
+            focus.blockSignals(False)
+
+    def nuclear_changed(self, channel, checked):
+        if not checked:
+            # The current nuclear role is transferred by selecting another row.
+            self.sync_channel_roles()
+            return
+        previous = self.nuclear_channel
+        field = self.channel_names[previous]
+        field.blockSignals(True)
+        field.setText(self.nonnuclear_names.get(previous, f'Channel {previous}'))
+        field.blockSignals(False)
+        self.nonnuclear_names[channel] = self.channel_names[channel].text().strip() or f'Channel {channel}'
+        self.nuclear_channel = channel
+        self.channel_notices.clear()
+        self.sync_channel_roles()
+        if self.sync_rgb_controls():
+            self.clear_source_pixels()
+        self.channel_changed()
+
+    def channel_name_changed(self, channel):
+        if channel == self.nuclear_channel:
+            self.sync_channel_roles()
+        else:
+            self.nonnuclear_names[channel] = self.channel_names[channel].text().strip() or f'Channel {channel}'
+        self.refresh_channel_labels()
+
+    def refresh_channel_labels(self, *_):
+        for channel, (box, controls) in self.floors.items():
+            label = self.channel_label(channel)
+            self.floor_labels[channel].setText(label)
+            self.floor_labels[channel].setVisible(label != f'Channel {channel}')
+            box.setAccessibleName(f'{label} · foci ADU floors')
+            for key, spin in controls.items():
+                spin.setAccessibleName(f'{self.channel_label(channel)} {label_for(key)}')
+        for channel, check in self.layer_checks.items():
+            role = 'nuclear' if channel == self.nuclear_channel else 'foci'
+            check.setText(f'{self.channel_label(channel)} · {role}')
+            check.setToolTip(check.text())
+        for channel, check in self.raw_checks.items():
+            check.setText(self.channel_label(channel))
+            check.setToolTip(check.text())
+        for channel, label in self.color_labels.items():
+            label.setText(self.channel_label(channel))
         self.sync_colocalization_channels()
+        if self.preview is not None:
+            # Names are metadata: keep existing segmentation and measurement objects.
+            self.preview.parameters['channels'] = self.current_channel_names()
+            self.select_nucleus()
+
+    def current_channel_names(self):
+        names = dict(self.parameters.get('channels', {}))
+        names.update({str(c): field.text().strip() or f'Channel {c}'
+                      for c, field in self.channel_names.items()})
+        names[str(self.nuclear_channel)] = 'Nucleus'
+        return names
 
     def sync_colocalization_channels(self, choices=None):
         if choices is None:
@@ -712,13 +994,13 @@ class OrionWindow(QMainWindow):
             combo.clear()
             combo.addItem('Choose channel…', None)
             for c in selected:
-                combo.addItem(f'Channel {c}', c)
+                combo.addItem(self.channel_label(c), c)
             combo.setCurrentIndex(max(0, combo.findData(channel)))
             combo.blockSignals(False)
 
     def colocalization_changed(self, *_, invalidate=True):
         enabled = self.coloc_enabled.isChecked()
-        self.coloc_container.setVisible(enabled)
+        self.coloc_container.setEnabled(enabled)
         index = next((i for i in range(self.view_tabs.count())
                       if self.view_tabs.tabText(i) == 'Colocalization'), -1)
         if enabled and index < 0:
@@ -739,6 +1021,11 @@ class OrionWindow(QMainWindow):
         for channel, values in settings.get('channels', {}).items():
             if not isinstance(channel, str) or not channel.isdecimal() or int(channel) < 1 or not isinstance(values, dict):
                 raise ValueError('Display colors must use positive channel numbers and color objects.')
+            for key in ('signal_auto', 'outline_auto'):
+                if key in values and type(values[key]) is not bool:
+                    raise ValueError(f'Channel {channel} {key} must be true or false.')
+            if 'nonnuclear_name' in values and not isinstance(values['nonnuclear_name'], str):
+                raise ValueError(f'Channel {channel} nonnuclear_name must be text.')
             for key, palette in [('signal', signals), ('outline', outlines)]:
                 if key in values:
                     value = values[key]
@@ -750,14 +1037,14 @@ class OrionWindow(QMainWindow):
     def rebuild_color_controls(self):
         self.clear_layout(self.colors_layout)
         self.color_buttons = {}
+        self.color_labels = {}
+        self.update_automatic_colors()
         for column, name in enumerate(('Channel', 'Signal / mask', 'Outline')):
             self.colors_layout.addWidget(QLabel(name), 0, column)
-        n = self.nuclear.currentData()
         for channel in self.foci_checks:
-            signal, outline = default_display_colors(channel, n)
-            self.signal_colors.setdefault(channel, QColor(*signal).name())
-            self.outline_colors.setdefault(channel, QColor(*outline).name())
-            self.colors_layout.addWidget(QLabel(f'Channel {channel}'), channel, 0)
+            label = text_label(self.channel_label(channel))
+            self.color_labels[channel] = label
+            self.colors_layout.addWidget(label, channel, 0)
             for column, kind in enumerate(('signal', 'outline'), start=1):
                 button = button_variant(QPushButton(), 'color')
                 button.setAccessibleName(f'Channel {channel} {kind} color')
@@ -768,13 +1055,15 @@ class OrionWindow(QMainWindow):
         reset = button_variant(QPushButton('Reset colors'), 'quiet')
         reset.clicked.connect(self.reset_display_colors)
         self.colors_layout.addWidget(reset, len(self.foci_checks) + 1, 0)
-        help_text = text_label('Display only · colors stay with their channel and are saved with Save JSON…')
+        help_text = text_label('Display only · defaults follow RGB sources; custom colors stay with their channel. '
+                               'Reset colors restores automatic defaults. Save JSON… preserves these choices.')
         self.colors_layout.addWidget(help_text, len(self.foci_checks) + 1, 1, 1, 2)
 
     def toggle_colors(self, checked):
         self.colors_panel.setVisible(checked)
         self.colors_toggle.setArrowType(Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow)
         if checked:
+            self.set_console_collapsed(False)
             self.inspection_dock.verticalScrollBar().setValue(0)
 
     def update_color_button(self, channel, kind):
@@ -788,7 +1077,7 @@ class OrionWindow(QMainWindow):
 
     def choose_display_color(self, channel, kind):
         palette = self.signal_colors if kind == 'signal' else self.outline_colors
-        color = QColorDialog.getColor(QColor(palette[channel]), self, f'Channel {channel} · {kind} color')
+        color = QColorDialog.getColor(QColor(palette[channel]), self, f'{self.channel_label(channel)} · {kind} color')
         if color.isValid():
             self.set_display_color(channel, kind, color)
 
@@ -798,36 +1087,77 @@ class OrionWindow(QMainWindow):
             raise ValueError('Choose a valid signal or outline color.')
         palette = self.signal_colors if kind == 'signal' else self.outline_colors
         palette[channel] = color.name()
+        automatic = self.signal_auto if kind == 'signal' else self.outline_auto
+        automatic[channel] = False
         if (channel, kind) in self.color_buttons:
             self.update_color_button(channel, kind)
         self.draw()
 
     def reset_display_colors(self):
         self.signal_colors, self.outline_colors = {}, {}
+        self.signal_auto = {c: True for c in self.channel_names}
+        self.outline_auto = {c: True for c in self.channel_names}
         self.rebuild_color_controls()
         self.draw()
 
+    def update_automatic_colors(self):
+        order = [color.currentData() for color in self.rgb_colors] if self.rgb_enabled.isChecked() else None
+        for channel in self.channel_names:
+            defaults = default_display_colors(channel, self.nuclear_channel, order)
+            for kind, palette, automatic, value in [
+                ('signal', self.signal_colors, self.signal_auto, defaults[0]),
+                ('outline', self.outline_colors, self.outline_auto, defaults[1]),
+            ]:
+                automatic.setdefault(channel, channel not in palette)
+                if automatic[channel] or channel not in palette:
+                    palette[channel] = QColor(*value).name()
+                if (channel, kind) in self.color_buttons:
+                    self.update_color_button(channel, kind)
+
     def channel_changed(self, *_):
+        self.sync_channel_roles()
         for channel, (box, _) in self.floors.items():
             box.setVisible(self.foci_checks[channel].isChecked())
         self.rebuild_layers()
         self.sync_colocalization_channels()
         self.invalidate_preview()
+        self.refresh_channel_labels()
 
     def rgb_changed(self, *_):
         self.sync_rgb_controls()
         # A color reassignment changes the source pixels for each channel.
-        self.pixels, self.metadata = None, None
-        self.viewer.scene().clear()
-        self.viewer.pixmap = None
+        self.clear_source_pixels()
         self.invalidate_preview()
         self.statusBar().showMessage('RGB mapping changed · preview again to reload channel pixels')
 
+    def clear_source_pixels(self):
+        self.pixels, self.metadata = None, None
+        self.viewer.scene().clear()
+        self.viewer.pixmap = None
+
     def sync_rgb_controls(self):
         enabled = self.rgb_enabled.isChecked()
-        self.rgb_container.setEnabled(enabled)
-        self.rgb_container.setVisible(enabled)
+        before = [color.currentData() for color in self.rgb_colors]
+        order = list(before)
+        if enabled and 1 <= self.nuclear_channel <= len(order):
+            index = self.nuclear_channel - 1
+            if order[index] != 'blue':
+                previous = order[index]
+                if 'blue' in order:
+                    order[order.index('blue')] = previous
+                order[index] = 'blue'
+                self.channel_message(f'RGB sources updated: {self.channel_label(self.nuclear_channel)} uses Blue.')
+        for channel, color in enumerate(self.rgb_colors, start=1):
+            color.blockSignals(True)
+            color.setCurrentIndex(color.findData(order[channel - 1]))
+            color.model().item(color.findData('blue')).setEnabled(channel == self.nuclear_channel)
+            color.setEnabled(enabled and channel != self.nuclear_channel)
+            color.blockSignals(False)
+            self.rgb_fields[channel].setVisible(enabled)
         self.rgb_help.setVisible(enabled)
+        self.update_channel_notice()
+        self.update_automatic_colors()
+        return before != order
 
     def prepare_input_parameters(self, paths):
         """Enable color mapping only when this input batch contains RGB exports.
@@ -854,37 +1184,61 @@ class OrionWindow(QMainWindow):
         md = inspect_image(path, inspection, require_calibration=False)
         if md['input_format'] == 'rgb_export' and parameters.get('rgb_channel_order') is None:
             self.rgb_enabled.setChecked(True)
-            self.rgb_colors[0].setFocus()
+            next((color for color in self.rgb_colors if color.isEnabled() and color.currentData() is None),
+                 self.rgb_enabled).setFocus()
             raise ValueError(f'{Path(path).name} is an RGB TIFF. In Basic parameters, '
-                             'choose the RGB color for Channels 1, 2, and 3, using '
-                             'red, green, and blue once each. Then preview or run again.')
+                             'choose Red and Green for the nonnuclear channels. Blue is assigned '
+                             'to the nuclear channel. Use each color once. Then preview or run again.')
         return md
 
     def rebuild_layers(self):
+        visible = {c: check.isChecked() for c, check in self.layer_checks.items()}
+        outlines = self.outlines.isChecked() if hasattr(self, 'outlines') else True
         self.clear_layout(self.layers_layout)
         self.layer_checks = {}
-        n = self.nuclear.currentData()
+        n = self.nuclear_channel
         channels = list(dict.fromkeys([n, *[c for c, check in self.foci_checks.items() if check.isChecked()]]))
         for channel in channels:
             if channel is None:
                 continue
             role = 'nuclear' if channel == n else 'foci'
-            check = QCheckBox(f'Channel {channel} · {role}')
-            check.setChecked(True)
+            check = QCheckBox(f'{self.channel_label(channel)} · {role}')
+            check.setToolTip(check.text())
+            check.setChecked(visible.get(channel, True))
             check.toggled.connect(self.draw)
             self.layers_layout.addWidget(check)
             self.layer_checks[channel] = check
         self.outlines = QCheckBox('Outlines')
-        self.outlines.setChecked(True)
+        self.outlines.setChecked(outlines)
         self.outlines.toggled.connect(self.draw)
         self.layers_layout.addWidget(self.outlines)
-        self.layers_layout.addStretch()
-        self.raw_channel.blockSignals(True)
-        self.raw_channel.clear()
-        for channel in range(1, len(self.foci_checks) + 1):
-            self.raw_channel.addItem(f'Channel {channel}', channel)
-        self.raw_channel.setCurrentIndex(self.raw_channel.findData(n))
-        self.raw_channel.blockSignals(False)
+        self.rebuild_raw_controls()
+
+    def rebuild_raw_controls(self):
+        self.clear_layout(self.raw_layout)
+        self.raw_checks={}
+        self.raw_layout.addWidget(text_label('Display channels','fieldLabel'))
+        count=self.pixels.shape[0] if self.pixels is not None else len(self.foci_checks)
+        selected={self.nuclear_channel} if self.raw_selection is None else self.raw_selection
+        if self.raw_selection is None and self.pixels is not None:self.raw_selection=set(selected)
+        for channel in range(1,count+1):
+            check=QCheckBox(self.channel_label(channel))
+            check.setToolTip(check.text())
+            check.setAccessibleName(f'Raw display Channel {channel}')
+            check.setChecked(channel in selected)
+            check.toggled.connect(lambda checked,c=channel:self.raw_channel_toggled(c,checked))
+            self.raw_layout.addWidget(check)
+            self.raw_checks[channel]=check
+        self.raw_empty=text_label('No channels selected')
+        self.raw_layout.addWidget(self.raw_empty)
+        self.raw_controls.setEnabled(self.pixels is not None)
+        self.raw_empty.setVisible(not any(check.isChecked() for check in self.raw_checks.values()))
+
+    def raw_channel_toggled(self,channel,checked):
+        if self.raw_selection is None:self.raw_selection={c for c,check in self.raw_checks.items() if check.isChecked()}
+        if checked:self.raw_selection.add(channel)
+        else:self.raw_selection.discard(channel)
+        self.draw()
 
     def threshold_changed(self, *_, invalidate=True):
         manual = self.threshold.currentIndex() == 1
@@ -902,19 +1256,25 @@ class OrionWindow(QMainWindow):
     def collect_parameters(self):
         p = deepcopy(self.parameters)
         self.advanced.apply(p)
+        p['channels'] = self.current_channel_names()
         display = p.setdefault('gui_display', {})
         display['channels'] = {str(channel): {'signal': self.signal_colors[channel],
-                                             'outline': self.outline_colors[channel]}
+                                             'outline': self.outline_colors[channel],
+                                             'signal_auto': self.signal_auto[channel],
+                                             'outline_auto': self.outline_auto[channel],
+                                             'nonnuclear_name': self.nonnuclear_names[channel]}
                                for channel in self.signal_colors}
         p['rgb_channel_order'] = None
         if self.rgb_enabled.isChecked():
+            if max([self.nuclear_channel, *[c for c, check in self.foci_checks.items() if check.isChecked()]]) > 3:
+                raise ValueError('RGB mapping supports only Channels 1, 2, and 3. Select available channels.')
             order = [color.currentData() for color in self.rgb_colors]
             if set(order) != {'red', 'green', 'blue'}:
                 raise ValueError('RGB mapping: choose a color for Channels 1, 2, and 3 '
                                  'in Basic parameters. Use red, green, and blue once each.')
             p['rgb_channel_order'] = order
         p['group_names'] = [name.strip() for name in self.groups.text().split(',')] if self.groups.text().strip() else []
-        p['nuclear_channel'] = self.nuclear.currentData()
+        p['nuclear_channel'] = self.nuclear_channel
         p['foci_channels'] = [c for c, check in self.foci_checks.items() if check.isChecked()]
         p['colocalization'] = {'enabled': self.coloc_enabled.isChecked(),
                                'channels': [self.coloc_a.currentData(), self.coloc_b.currentData()],
@@ -925,7 +1285,7 @@ class OrionWindow(QMainWindow):
             key = f'channel_{channel}'
             if channel in p['foci_channels'] or key in p['foci']:
                 values = p['foci'].setdefault(key, {})
-                values.update({name: spin.value() for name, spin in controls.items()})
+                values.update({name: spin.effective_value() for name, spin in controls.items()})
         p['qc_output'] = self.qc_mode.currentText()
         return validate_parameters(p)
 
@@ -1021,7 +1381,7 @@ class OrionWindow(QMainWindow):
         self.pixels, self.metadata = None, None
         self.viewer.scene().clear()
         self.viewer.pixmap = None
-        self.image_info.setText('Load TIFF images to begin')
+        self.image_info.setText('Preview an image to begin')
         self.invalidate_preview()
 
     def invalidate_preview(self, *_):
@@ -1058,6 +1418,15 @@ class OrionWindow(QMainWindow):
         name = STAGE_LABELS[self.run_progress.stage]
         self.stage_label.setText(name)
         self.stage_progress.setAccessibleName(f'{name} progress')
+
+    def start_elapsed_time(self):
+        self.analysis_clock.start()
+        self.elapsed_label.setText('Elapsed 00:00:00')
+        self.elapsed_timer.start()
+
+    def update_elapsed_time(self):
+        if self.elapsed_timer.isActive() and self.analysis_clock.isValid():
+            self.elapsed_label.setText('Elapsed ' + format_elapsed(self.analysis_clock.elapsed()))
 
     def start_preview(self):
         if self.busy:
@@ -1104,6 +1473,7 @@ class OrionWindow(QMainWindow):
 
     def preview_complete(self, preview):
         self.preview = preview
+        self.preview.parameters['channels'] = self.current_channel_names()
         self.pixels, self.metadata = preview.pixels, preview.metadata
         self.selected = 0
         self.image_info.setText(f'{preview.pixels.shape[0]} channels · {preview.pixels.shape[2]} × {preview.pixels.shape[1]} px')
@@ -1121,33 +1491,34 @@ class OrionWindow(QMainWindow):
                   'DAPI_background_smoothed_adu', 'DAPI_background_smoothed_mad_adu'}} for r in preview.cells]
         self.show_table(pd.DataFrame(rows), f'Preview measurements · {preview.path.name} · no files saved', 'preview')
         self.draw(fit=True)
-        message = f'Preview ready · nuclear Channel {preview.parameters["nuclear_channel"]} · {len(preview.cells)} usable nuclei'
+        message = f'Preview ready · nuclear {self.channel_label(preview.parameters["nuclear_channel"])} · {len(preview.cells)} usable nuclei'
         self.statusBar().showMessage(message)
         self.log.appendPlainText(message)
 
     def draw(self, *_, fit=False):
         mode = self.view_tabs.tabText(self.view_tabs.currentIndex())
-        self.raw_channel.setEnabled(mode == 'Raw image')
         self.raw_controls.setVisible(mode == 'Raw image')
+        count=self.pixels.shape[0] if self.pixels is not None else len(self.foci_checks)
+        if set(self.raw_checks)!=set(range(1,count+1)):self.rebuild_raw_controls()
+        self.raw_controls.setEnabled(mode=='Raw image' and self.pixels is not None)
+        self.raw_empty.setVisible(not any(check.isChecked() for check in self.raw_checks.values()))
         if self.pixels is None:
             return
         # A previous image may have fewer channels than newly chosen controls.
-        n = self.nuclear.currentData() or 1
+        n = self.nuclear_channel
         foci = [c for c, check in self.foci_checks.items() if check.isChecked()]
-        if max([n, *foci]) > self.pixels.shape[0]:
+        if mode!='Raw image' and max([n, *foci]) > self.pixels.shape[0]:
             return
         p = dict(nuclear_channel=n, foci_channels=foci)
         if self.preview is None and mode in ('Nuclei', 'Foci', 'Colocalization'):
             rgb = np.zeros((*self.pixels.shape[1:], 3), dtype=np.uint8)
         else:
-            raw_channel = self.raw_channel.currentData() or n
-            if raw_channel > self.pixels.shape[0]:
-                return
-            rgb = render_image(self.pixels, p, self.preview, mode, raw_channel,
+            rgb = render_image(self.pixels, p, self.preview, mode, None,
                                [c for c, check in self.layer_checks.items() if check.isChecked()],
                                self.outlines.isChecked(), self.selected,
                                {c: QColor(color).getRgb()[:3] for c, color in self.signal_colors.items()},
-                               {c: QColor(color).getRgb()[:3] for c, color in self.outline_colors.items()})
+                               {c: QColor(color).getRgb()[:3] for c, color in self.outline_colors.items()},
+                               raw_channels=[c for c,check in self.raw_checks.items() if check.isChecked()])
         self.viewer.show_rgb(rgb, self.metadata, fit)
 
     def pick_nucleus(self, x, y):
@@ -1166,7 +1537,7 @@ class OrionWindow(QMainWindow):
             self.nucleus_info.setText('Select a nucleus to inspect its measurements.')
         else:
             lines = [f'Nucleus {self.selected} · {"included" if rec["included"] else "excluded"}',
-                     f'Area: {rec["nuclear_area_um2"]:.3g} µm² · Nuclear Channel {self.preview.parameters["nuclear_channel"]}']
+                     f'Area: {rec["nuclear_area_um2"]:.3g} µm² · Nuclear {self.channel_label(self.preview.parameters["nuclear_channel"])}']
             if rec['exclusion_reason']:
                 lines.append('Exclusion: ' + rec['exclusion_reason'])
             if rec['nuclear_shape_warning']:
@@ -1175,7 +1546,7 @@ class OrionWindow(QMainWindow):
                          (f' to {rec["nuclear_threshold_upper_adu"]:g} ADU' if rec['nuclear_threshold_upper_adu'] is not None else ' · automatic'))
             for c in self.preview.parameters['foci_channels']:
                 rows = [r for r in self.preview.foci if r['nucleus_label'] == self.selected and r['channel'] == c]
-                line = f'Channel {c}: {len(rows)} foci'
+                line = f'{self.channel_label(c)}: {len(rows)} foci'
                 t = next((r for r in self.preview.thresholds if r['channel'] == c and r['nucleus_label'] == self.selected), None)
                 if t:
                     line += ' · ADU support / seed / prominence: ' + ' / '.join(
@@ -1223,6 +1594,7 @@ class OrionWindow(QMainWindow):
         self.statusBar().showMessage(message)
         self.log.appendPlainText('Error: ' + message)
         self.tabs.setCurrentWidget(self.log)
+        self.set_console_collapsed(False)
         self.inspection_dock.ensureWidgetVisible(self.tabs)
         QMessageBox.warning(self, 'scikitORION', message)
 
@@ -1246,12 +1618,14 @@ class OrionWindow(QMainWindow):
             self.set_busy(True, processing=True)
             self.tabs.setCurrentWidget(self.log)
             self.log.appendPlainText(f'Analyzing {len(paths)} image(s)\nOutput: {output}\n'
-                                     f'Nuclear: Channel {p["nuclear_channel"]}; foci: {p["foci_channels"]}\n'
+                                     f'Nuclear: {self.channel_label(p["nuclear_channel"], p)}; '
+                                     f'foci: {", ".join(self.channel_label(c, p) for c in p["foci_channels"])}\n'
                                      'Current settings are saved with this run; the loaded JSON is unchanged.')
             self.report_button.setEnabled(False)
             self.stage = 'analysis'
             # Keep each stage in its own QProcess so Stop also stops report
             # generation instead of leaving the CLI's renderer child running.
+            self.start_elapsed_time()
             self.start_process('analyze_foci.py', ['--input-dir', str(source), '--output-dir', str(output),
                                                  '--parameters', str(snapshot), '--qc-output', 'off'])
         except (OSError, ValueError, KeyError, TypeError) as exc:
@@ -1312,7 +1686,7 @@ class OrionWindow(QMainWindow):
                 self.start_process('validate_results.py', ['--output-dir', str(self.run_output)])
             else:
                 self.finish_run(True)
-                self.load_saved_results(self.run_output)
+                self.load_saved_results(self.run_output, reveal=False)
                 self.statusBar().showMessage(f'Analysis complete and validated · {self.run_output}')
 
     def process_error(self, error):
@@ -1321,6 +1695,8 @@ class OrionWindow(QMainWindow):
             self.show_error('Could not start the analysis process: ' + self.process.errorString())
 
     def finish_run(self, success):
+        self.update_elapsed_time()
+        self.elapsed_timer.stop()
         self.set_busy(False)
         if self.run_progress is not None and self.run_progress.active:
             self.run_progress.finish(success)
@@ -1344,7 +1720,7 @@ class OrionWindow(QMainWindow):
         if self.cancel_requested and self.process.state() != QProcess.ProcessState.NotRunning:
             self.process.kill()
 
-    def load_saved_results(self, directory=None):
+    def load_saved_results(self, directory=None, *, reveal=True):
         # QPushButton.clicked supplies a bool, not a directory.
         if self.busy:
             return
@@ -1358,11 +1734,13 @@ class OrionWindow(QMainWindow):
                     'image_id', 'image_name', 'treatment_group', 'group_names', 'replicate_id', 'nucleus_id', 'nucleus_label'}]
                 coloc = coloc[columns].rename(columns={c: f'coloc_{c}' for c in columns if c != 'nucleus_id'})
                 frame = frame.merge(coloc, on='nucleus_id', how='left', validate='one_to_one')
-            channels = ', '.join(f'Channel {c}' for c in parameters['foci_channels'])
-            self.show_table(frame, f'Saved run · {output.name} · nuclear Channel {parameters["nuclear_channel"]} · foci {channels}', 'saved')
+            channels = ', '.join(self.channel_label(c, parameters) for c in parameters['foci_channels'])
+            self.show_table(frame, f'Saved run · {output.name} · nuclear {self.channel_label(parameters["nuclear_channel"], parameters)} · foci {channels}', 'saved')
             self.run_output = output
             self.report_button.setEnabled((output / 'Review.html').is_file())
             self.tabs.setCurrentIndex(1)
+            if reveal:
+                self.set_console_collapsed(False)
         except (OSError, ValueError, KeyError) as exc:
             self.show_error(str(exc))
 

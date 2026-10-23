@@ -78,7 +78,13 @@ class ExperimentSummaryTests(unittest.TestCase):
         scatter=fig.axes[-1]
         np.testing.assert_array_equal(scatter.collections[0].get_offsets(),[[0,0],[0,1],[0,2],[4,3],[9,9]])
         np.testing.assert_array_equal(scatter.collections[1].get_offsets(),[[0,0]])
-        self.assertEqual(len(scatter.lines),0)
+        self.assertEqual(len(scatter.lines),1)
+        np.testing.assert_array_equal(scatter.lines[0].get_xdata(),[0,9])
+        np.testing.assert_allclose(scatter.lines[0].get_ydata(),[3-2.6*54/63.2,3+(9-2.6)*54/63.2])
+        legend=[text.get_text() for text in fig.axes[0].get_legend().get_texts()]
+        self.assertIn('2 images · 5 nuclei',legend[0])
+        self.assertIn('1 images · 1 nuclei',legend[1])
+        self.assertTrue(any('No trend fit' in text.get_text() for text in scatter.texts))
         self.assertIn('C4 Focus B',scatter.get_xlabel());self.assertIn('C1 Focus A',scatter.get_ylabel())
         for collection in scatter.collections:
             self.assertTrue(collection.get_rasterized())
@@ -119,6 +125,20 @@ class ExperimentSummaryTests(unittest.TestCase):
         self.assertEqual(fig.axes[6].get_xscale(),'linear')
         self.assertEqual(fig.axes[7].get_xscale(),'linear')
         self.assertEqual(sum(len(collection.get_offsets()) for collection in fig.axes[-1].collections),6)
+
+    def test_known_trends_constant_y_and_legend_counts_ignore_missing_pairs(self):
+        mapping,images,cells,focus,p=self.fixture()
+        cells['C4_foci_count']=[0.,2.,4.,np.nan,np.inf,0.]
+        cells['C1_foci_count']=[1.,5.,9.,7.,8.,0.]
+        fig=self.draw((mapping,images,cells,focus,p))
+        scatter=fig.axes[-1]
+        np.testing.assert_array_equal(scatter.lines[0].get_xdata(),[0,4])
+        np.testing.assert_allclose(scatter.lines[0].get_ydata(),[1,9])
+        legend=fig.axes[0].get_legend().get_texts()[0].get_text()
+        self.assertIn('2 images · 5 nuclei',legend)
+        cells['C1_foci_count']=3.
+        fig=self.draw((mapping,images,cells,focus,p))
+        np.testing.assert_array_equal(fig.axes[-1].lines[0].get_ydata(),[3,3])
 
     def test_exports_long_labels_and_failure_cleanup(self):
         data=self.fixture()

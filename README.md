@@ -237,29 +237,53 @@ their licenses are bundled for offline use. Shared presentation tokens and Qt
 components live in `gui_theme.py`; the compact panel spacing is 12 px. The image
 viewer keeps its own colors and calibrated pixels. The setup sidebar and lower
 inspection dock scroll independently so expanded settings and color controls
-remain usable in smaller desktop windows.
+remain usable in smaller desktop windows. Drag the dividers to resize either
+panel. Gold-framed arrow grips sit on the resize dividers: the vertical grip
+hides or restores settings, and the horizontal grip hides or restores the
+bottom console. Drag the divider outside its grip to resize. Collapsed panels
+leave a narrow edge strip with their restore grip visible.
+Panels return to their last expanded size within the current session. Run,
+Preview, Stop, progress, and results/report actions stay visible in the footer.
+Errors open the Analysis log, while ordinary processing respects a collapsed
+console. The log uses an installed monospaced font, independent of the theme's
+body font.
 
 1. Enter or browse to an input directory, an output directory, and a parameters
    directory. **Load JSON** reads the named experiment file; **Save JSON…** saves
    your edited configuration separately. The bundled template is loaded initially.
-2. Choose the nuclear channel and any foci channels independently. All selectors
-   use neutral labels (`Channel 1`, `Channel 2`, etc.); there is no fixed stain
-   assignment. For example, choose nuclear Channel 3 and foci Channels 1 and 2.
+2. Use the channel rows to enter marker names and select **Foci** or **Nuclear**.
+   Exactly one channel is nuclear; its disabled name field automatically shows
+   **Nucleus**, which is also used in saved settings and subsequent reports.
+   Its previous marker name is remembered and restored when the role moves;
+   this backup survives saving and reopening settings. Older settings already
+   named Nucleus without a backup fall back to `Channel N` when the role moves.
+   The nuclear Foci checkbox is disabled. Selecting another nuclear channel
+   transfers the role; the previous nuclear channel becomes unused until you select Foci.
+   Select at least one foci channel. Channel numbers stay fixed, with marker
+   names shown alongside them throughout the viewer and saved in `channels`.
+   Blank names use `Channel N`. For example, choose nuclear Channel 3 and foci
+   Channels 1 and 2.
    Images with more than three channels expand the available choices. Foci ADU
    floors belong to their physical channel and appear for each selected channel.
    A newly configured channel starts with zero floors, so noise thresholds apply
    until you enter experiment-specific floors. Review these settings before a run.
    **Map RGB TIFF colors to channels** is an explicit toggle, off by default.
-   Its color selectors appear only while enabled. Loading or running a batch
+   Its source-color selectors appear inside the channel rows only while enabled.
+   Loading or running a batch
    enables mapping if any input is an RGB TIFF export; batches containing only
-   channel stacks turn it off. Saved color choices are remembered, but no
-   color assignment is inferred from the nuclear/foci roles. For RGB inputs,
-   choose a color for Channels 1, 2, and 3, using red, green, and
-   blue once each. For blue nuclei, green Channel 2, and red Channel 3, choose
-   Blue / Green / Red and nuclear Channel 1. Other assignments are equally valid;
-   nuclear and foci roles are selected separately. This mapping is saved as
-   `rgb_channel_order` in JSON and is used by both previews and full runs.
-   Channel stacks retain their original channel order.
+   channel stacks turn it off. Saved color choices are remembered. In the GUI,
+   the nuclear channel is automatically assigned Blue and locked; choose Red
+   and Green for the other two channels, using each color once. Moving the
+   nuclear role swaps its previous source color with Blue. Enabling mapping or
+   loading an older RGB configuration applies the same swap and displays a
+   notice. These are source-pixel assignments; signal and outline display
+   colors stay independent. RGB exports support Channels 1–3 only.
+   This mapping is saved as `rgb_channel_order` in JSON and is used by both
+   previews and full runs.
+   Channel stacks retain their original channel order. Older configurations
+   assigning both roles to one channel retain the nuclear role and clear its
+   foci role with a notice. Loading settings never rewrites the source JSON.
+   Command-line channel selection and mapping behavior are unchanged.
 3. Choose automatic nuclear thresholding (the default) or an inclusive manual
    ADU range. Expand **Advanced parameters** to edit the remaining numeric,
    Boolean, metadata, and JSON-list settings. Fixed method descriptions remain
@@ -268,18 +292,34 @@ remain usable in smaller desktop windows.
    calibration override. Sensitivity factors
    must retain 0.8 and 1.2 for the existing QC summary columns; extra factors may
    be added. Generated methods describe the effective numerical settings.
-4. **Load images** discovers TIFF files and previews the first image. **Preview
-   image** computes real masks and measurements for the selected image without
-   saving output files. Use the **Raw image**, **Nuclei**, **Foci**, and **Overlay**
+4. **Preview image** discovers TIFF files and previews the first image when none
+   are loaded, or refreshes real masks and measurements for the selected image
+   without saving output files. Use the **Raw image**, **Nuclei**, **Foci**, and **Overlay**
    tabs above the viewer to switch views while retaining zoom and pan;
    toggle channels and outlines, zoom with the mouse wheel or buttons, and drag
-   to pan. Click a nucleus or use the inspector selector to see its area,
+   to pan. In **Raw image**, check one or more channels directly under the tabs
+   to blend their signal colors. These choices are independent of the bottom
+   overlay checkboxes and persist across tab changes. No channels selected gives
+   a black canvas and an explicit message. Raw viewing includes any available
+   channel, irrespective of analysis roles, and never adds masks or outlines.
+   Support, Seed, and Prominence floor inputs display one decimal and step by
+   0.1 ADU. Untouched imported values retain their full precision for preview and
+   saving; only explicitly edited floors adopt the displayed precision.
+   Click a nucleus or use the inspector selector to see its area,
    exclusions, foci counts, and applied thresholds. Expand **Channel colors**
    below the viewer to choose independent signal/mask and outline pseudocolors
    for each channel. Color changes redraw immediately, retain computed masks,
-   and stay with the channel when its nuclear/foci role changes. **Save JSON…**
-   stores the colors under `gui_display`; **Load JSON** restores them. **Reset
-   colors** restores the default palette. Display colors and contrast affect
+   and custom colors stay with the channel when its nuclear/foci role changes.
+   Automatic defaults follow RGB source assignments: Green uses `(0, 244, 8)`
+   (`#00F408`) and Red uses `(153, 29, 33)` (`#991D21`) for signal/masks and
+   outlines. Without RGB mapping, the first two nonnuclear channels in channel
+   order use green and red; extra channels use the existing fallback palette.
+   Nuclear blue defaults are retained. Manual signal and outline choices
+   override these defaults independently. **Save JSON…** stores the colors,
+   automatic/custom flags, and marker-name backups under `gui_display.channels`;
+   **Load JSON** restores them. Older saved colors remain explicit overrides.
+   **Reset colors** restores automatic defaults for the current mapping.
+   Display colors and contrast affect
    only the GUI view; exported reports use their existing palette, and detection
    uses the original pixels. Analysis parameter edits invalidate old preview masks.
 5. **Run analysis** processes the whole input directory, generates the selected
@@ -307,6 +347,12 @@ after all required processes succeed. Stopping or failing retains the last
 percentages; a new run resets them. A single-image preview shows **—** for
 overall progress and an indeterminate preview indicator while it runs.
 
+**Elapsed HH:MM:SS** in the footer shows real elapsed analysis time from worker
+launch through masks, outputs, and validation. It updates once per second using
+a monotonic clock and freezes when processing finishes, fails, or finishes
+stopping. A new accepted analysis resets it; previews and preflight errors leave
+the previous duration unchanged. Elapsed time is not saved in analysis parameters.
+
 For programmatic monitoring, the analysis, output, and validation scripts accept
 `--progress-json`. It adds flushed lines starting with `ORION_PROGRESS ` followed
 by JSON containing `stage`, `completed`, `total`, and `detail`. Normal command-line
@@ -318,8 +364,10 @@ standalone installer. The original command-line workflow remains available.
 
 ## Optional colocalization analysis
 
-Check **Analyze colocalization** beneath the foci-channel selections to reveal
-Marker A, Marker B, and Minimum shared pixels. The default pair is Channels 2/3
+The framed **Colocalization** section follows channel assignment in Basic
+parameters. Check **Analyze colocalization** to enable Marker A, Marker B, and
+Minimum shared pixels. These inputs stay visible but disabled when the option
+is off, retaining their selections. The default pair is Channels 2/3
 and the default minimum is one shared pixel. Both distinct channels must already
 be selected for foci analysis. Settings are saved by **Save JSON…** and restored
 by **Load JSON**. The same settings work through the command-line parameter file:
@@ -347,6 +395,10 @@ New runs save `Results/Colocalization_Pairs.csv`, `Colocalization_Foci.csv`,
 is off. With reports enabled, a dedicated section appears after the plots and
 files/reproducibility links, immediately before **Inspect every image**.
 It includes treatment figures, per-image overlays, definitions and CSV links.
+Opposite-channel partner distributions use one discrete probability line per
+treatment in each marker-direction panel, normalized per focus within the group.
+They include zero and all observed integer counts above three, share an integer
+X axis, and apply no continuous density smoothing.
 Existing configurations without the colocalization block remain disabled;
 existing results remain loadable. To add measurements to an older analysis,
 run a new analysis with colocalization enabled in a new output directory.
@@ -562,8 +614,13 @@ combined `treatment_group`. Colors match the detailed graphs.
 Exactly two selected foci channels also produce a nucleus scatter: the first
 selected channel is X and the second is Y, with one point per usable nucleus,
 including zero counts, colored by treatment. Channel subsets control the summary
-contents; one or more than two selected channels omit the scatter. No fitted line
-or correlation statistics are added. Missing and nonfinite values are omitted
+contents; one or more than two selected channels omit the scatter. Each treatment
+with at least two finite pairs and distinct X values receives an ordinary
+least-squares trend line over its observed X range. Groups without a defined fit
+are identified in a plot note. No confidence bands, correlation statistics, or
+significance tests are added. The top legend shows each treatment's number of
+images and accepted nuclei, including observations omitted from finite scatter
+pairs. Missing and nonfinite values are omitted
 per panel, and panels without valid observations display "No measurements".
 
 The PNG is exported at 300 dpi; the SVG keeps text and lines editable, with point
@@ -571,10 +628,16 @@ layers rasterized. Links appear near the top of `Review.html`. Regenerating outp
 overwrites both summary files without repeating segmentation; `--qc-output off`
 continues to skip figure/report generation.
 
-In `Review.html`, summary graphs appear before image inspection. The final
+In `Review.html`, summary graphs appear before image inspection. The
 "Inspect every image" section groups images by `treatment_group`, with each
 group collapsed by default. Expand a group to see its annotated images and,
 for detailed QC, individual nucleus galleries.
+
+After image inspection, **Flagged image review** is collapsed by default and
+contains flagged-image reasons and links, the CSV download, and a nested **Full
+outlier assessment** table with every assessed and unassessed endpoint, including
+values, sample counts, quartiles, fences, and statuses. **QC Findings** is the
+final section, also collapsed by default, containing the numerical QC table.
 
 Raw TIFFs remain in their input directory. The saved mapping records their source
 paths; plotting and validation still need those TIFFs to be available there.

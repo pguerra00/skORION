@@ -140,15 +140,20 @@ def analyze_preview(path, parameters):
 
 
 def channel_color(channel):
-    return np.array(((100, 235, 165), (247, 146, 210), (90, 210, 245),
+    return np.array(((100, 235, 165), (247, 146, 210), (0, 244, 8),
                      (250, 189, 90), (194, 155, 248))[(channel - 1) % 5], dtype=float)
 
 
-def default_display_colors(channel, nuclear_channel):
-    """Initial signal and outline colors; GUI choices stay with channel numbers."""
+def default_display_colors(channel, nuclear_channel, rgb_channel_order=None):
+    """Source-aware defaults; explicit GUI pseudocolors override these colors."""
     if channel == nuclear_channel:
-        return (80, 120, 240), (105, 215, 245)
-    color = tuple(int(value) for value in channel_color(channel))
+        return (0, 44, 236), (105, 215, 245)
+    green, red = (0, 244, 8), (153, 29, 33)
+    source = (rgb_channel_order[channel - 1] if rgb_channel_order and channel <= len(rgb_channel_order)
+              else None)
+    rank = channel - 1 - (channel > nuclear_channel)
+    color = ({'green': green, 'red': red}.get(source) or
+             (green if rank == 0 else red if rank == 1 else tuple(int(value) for value in channel_color(channel))))
     return color, color
 
 
@@ -164,7 +169,7 @@ def display_signal(raw):
 
 def render_image(pixels, parameters, preview=None, mode='Overlay', raw_channel=None,
                  visible_channels=None, outlines=True, selected=0,
-                 signal_colors=None, outline_colors=None):
+                 signal_colors=None, outline_colors=None, *, raw_channels=None):
     """Render display-only pseudocolors, without changing source pixels or masks."""
     n = parameters['nuclear_channel']
     foci = parameters['foci_channels']
@@ -172,14 +177,17 @@ def render_image(pixels, parameters, preview=None, mode='Overlay', raw_channel=N
 
     def color(channel, outline=False):
         palette = (outline_colors if outline else signal_colors) or {}
-        defaults = default_display_colors(channel, n)
+        defaults = default_display_colors(channel, n, parameters.get('rgb_channel_order'))
         return np.asarray(palette.get(channel, defaults[1 if outline else 0]), dtype=float)
 
     canvas = np.zeros((*pixels.shape[1:], 3), dtype=float)
     if mode == 'Raw image':
-        channel = raw_channel or n
-        signal = display_signal(pixels[channel - 1])
-        canvas[:] = signal[..., None] * color(channel)
+        channels = [raw_channel or n] if raw_channels is None else list(dict.fromkeys(raw_channels))
+        for channel in channels:
+            if not 1 <= channel <= pixels.shape[0]:
+                raise ValueError(f'Raw display channel {channel} is unavailable')
+            signal = display_signal(pixels[channel - 1])
+            canvas += signal[..., None] * color(channel)
     elif mode == 'Overlay':
         if n in visible:
             canvas += display_signal(pixels[n - 1])[..., None] * color(n)

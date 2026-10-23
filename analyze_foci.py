@@ -146,7 +146,7 @@ def nuclear_segmentation(raw,p,sx,sy):
         if aspect>p['shape_warning_aspect_ratio_above']:shape.append('elongated nucleus')
         rec={'nucleus_label':r.label,'included':not reason,'exclusion_reason':'; '.join(reason),
              'nuclear_area_px':int(r.area),'nuclear_area_um2':area,
-             'nuclear_mean_DAPI_adu':r.mean_intensity,'nuclear_median_DAPI_adu':float(np.median(raw[r.slice][r.image])),
+             'nuclear_mean_DAPI_adu':r.intensity_mean,'nuclear_median_DAPI_adu':float(np.median(raw[r.slice][r.image])),
              'nuclear_centroid_x_px':r.centroid[1],'nuclear_centroid_y_px':r.centroid[0],
              'nuclear_centroid_x_um':r.centroid[1]*sx,'nuclear_centroid_y_um':r.centroid[0]*sy,
              'nuclear_solidity':r.solidity,'nuclear_eccentricity':r.eccentricity,

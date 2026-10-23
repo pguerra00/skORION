@@ -88,7 +88,7 @@ class DownstreamChannelTests(unittest.TestCase):
         self.assertIn('Comparisons use combined treatment groups',review)
         self.assertIn('href="Experiment_Summary.png"',review)
         self.assertIn('href="Experiment_Summary.svg"',review)
-        self.assertLess(review.index('href="Experiment_Summary.png"'),review.index('<h2>QC findings'))
+        self.assertLess(review.index('href="Experiment_Summary.png"'),review.index('id="qc-findings"'))
         self.assertNotIn('Groups can overlap',review)
         methods=(out/'Methods/Methods.md').read_text(encoding='utf-8')
         self.assertIn('Minimal QC was requested',methods)

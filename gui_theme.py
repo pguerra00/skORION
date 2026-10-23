@@ -6,11 +6,11 @@ to the application and never inherit this palette.
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QDate, QPointF, QRectF, Qt
+from PySide6.QtCore import QDate, QEvent, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer
 from PySide6.QtGui import (QColor, QFont, QFontDatabase, QLinearGradient, QPainter,
                            QPalette, QPen, QPolygonF)
 from PySide6.QtWidgets import (QFormLayout, QFrame, QGroupBox, QHBoxLayout,
-                               QLabel, QScrollArea, QVBoxLayout, QWidget)
+                               QLabel, QLayout, QScrollArea, QToolButton, QVBoxLayout, QWidget)
 
 
 @dataclass(frozen=True)
@@ -216,6 +216,23 @@ def button_variant(button, variant='default'):
     return button
 
 
+def apply_log_font(widget):
+    """A local rule keeps the global body-font selector out of console text."""
+    available = QFontDatabase.families()
+    preferred = ['Menlo', 'Consolas', 'DejaVu Sans Mono', 'Liberation Mono', 'Courier New']
+    families = preferred + sorted(available)
+    family = next((name for name in families if name in available and QFontDatabase.isFixedPitch(name)), None)
+    font = QFont(family) if family else QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+    font.setStyleHint(QFont.StyleHint.Monospace)
+    font.setFixedPitch(True)
+    font.setPixelSize(TOKENS.body_px)
+    widget.setObjectName('analysisLog')
+    widget.setStyleSheet(f'QPlainTextEdit#analysisLog {{ font-family: "{font.family()}"; '
+                        f'font-size: {TOKENS.body_px}px; }}')
+    widget.setFont(font)
+    widget.document().setDefaultFont(font)
+
+
 def layout_metrics(layout, margin=TOKENS.space, spacing=TOKENS.gap):
     layout.setContentsMargins(margin, margin, margin, margin)
     layout.setSpacing(spacing)
@@ -238,6 +255,70 @@ class DecoForm(QFormLayout):
                 label.setBuddy(args[1])
             args = (label, args[1])
         return super().addRow(*args)
+
+
+class DecoFlowLayout(QLayout):
+    """Keep named channel controls readable by wrapping at the available width."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.items = []
+        self.setContentsMargins(0, 0, 0, 0)
+        self.setSpacing(TOKENS.gap)
+
+    def addItem(self, item):
+        self.items.append(item)
+        self.invalidate()
+
+    def count(self):
+        return len(self.items)
+
+    def itemAt(self, index):
+        return self.items[index] if 0 <= index < len(self.items) else None
+
+    def takeAt(self, index):
+        if 0 <= index < len(self.items):
+            item = self.items.pop(index)
+            self.invalidate()
+            return item
+        return None
+
+    def expandingDirections(self):
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self.arrange(QRect(0, 0, width, 0), measure=True)
+
+    def minimumSize(self):
+        margins = self.contentsMargins()
+        height = max((item.minimumSize().height() for item in self.items), default=0)
+        return QSize(margins.left() + margins.right(), height + margins.top() + margins.bottom())
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self.arrange(rect)
+
+    def arrange(self, rect, measure=False):
+        margins = self.contentsMargins()
+        area = rect.adjusted(margins.left(), margins.top(), -margins.right(), -margins.bottom())
+        x, y, row_height = area.x(), area.y(), 0
+        for item in self.items:
+            if item.isEmpty():
+                continue
+            size = item.sizeHint()
+            width = min(size.width(), max(0, area.width()))
+            if row_height and x + width > area.x() + area.width():
+                x, y, row_height = area.x(), y + row_height + self.spacing(), 0
+            if not measure:
+                item.setGeometry(QRect(x, y, width, size.height()))
+            x += width + self.spacing()
+            row_height = max(row_height, size.height())
+        return y + row_height - rect.y() + margins.bottom()
 
 
 class DecoPanel(QGroupBox):
@@ -347,14 +428,111 @@ class DecoImageFrame(QFrame):
         painter.drawRect(self.rect().adjusted(4, 4, -5, -5))
 
 
+class DecoSplitterGrip(QToolButton):
+    """A disclosure grip over a splitter, without widening the draggable line.
+
+    The shell owns the overlay so it can straddle the divider and stay visible
+    when its panel is hidden. Collapsed panels leave only a slim restore rail.
+    """
+    def __init__(self, splitter, shell):
+        super().__init__(shell)
+        self.splitter = splitter
+        self.expanded = True
+        self.pending_position = False
+        self.watched_handle = None
+        self.horizontal = splitter.orientation() == Qt.Orientation.Horizontal
+        self.setFixedSize(44, TOKENS.space * 12) if self.horizontal else self.setFixedSize(TOKENS.space * 14, 44)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setStyleSheet('QToolButton, QToolButton:hover, QToolButton:checked, QToolButton:focus '
+                          '{ background: transparent; border: 0; padding: 0; }')
+        self.setAccessibleDescription('Click to hide or restore the panel. Drag the divider outside this grip to resize.')
+        splitter.installEventFilter(self)
+        shell.installEventFilter(self)
+        splitter.splitterMoved.connect(self.reposition)
+        self.queue_position()
+
+    def setExpanded(self, expanded):
+        self.expanded = expanded
+        margins = (0, 0, 0, 0) if expanded else ((self.width(), 0, 0, 0) if self.horizontal else
+                                               (0, 0, 0, self.height()))
+        self.splitter.setContentsMargins(*margins)
+        self.reposition()
+        self.queue_position()
+
+    def eventFilter(self, watched, event):
+        if event.type() in (QEvent.Type.Resize, QEvent.Type.Move, QEvent.Type.Show, QEvent.Type.LayoutRequest):
+            self.queue_position()
+        return super().eventFilter(watched, event)
+
+    def queue_position(self):
+        if not self.pending_position:
+            self.pending_position = True
+            QTimer.singleShot(0, self.reposition)
+
+    def reposition(self, *_):
+        self.pending_position = False
+        if not self.splitter.isVisible():
+            return
+        handle = self.splitter.handle(1) if self.splitter.count() > 1 else None
+        if handle is not self.watched_handle and handle is not None:
+            self.watched_handle = handle
+            handle.installEventFilter(self)
+        if self.expanded and handle is not None and handle.isVisible():
+            center = handle.mapTo(self.parentWidget(), handle.rect().center())
+            position = center - QPoint(self.width() // 2, self.height() // 2)
+        else:
+            bounds = self.splitter.rect()
+            position = (QPoint(0, (bounds.height() - self.height()) // 2) if self.horizontal else
+                        QPoint((bounds.width() - self.width()) // 2, bounds.height() - self.height()))
+            position = self.splitter.mapTo(self.parentWidget(), position)
+        self.move(position)
+        self.raise_()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        frame = QRectF(self.rect()).adjusted(6 if self.horizontal else 1, 1 if self.horizontal else 6,
+                                             -6 if self.horizontal else -1, -1 if self.horizontal else -6)
+        left, top, right, bottom = frame.left(), frame.top(), frame.right(), frame.bottom()
+        cut = 4
+        outline = QPolygonF([QPointF(left + cut, top), QPointF(right - cut, top),
+                             QPointF(right - cut, top + cut), QPointF(right, top + cut),
+                             QPointF(right, bottom - cut), QPointF(right - cut, bottom - cut),
+                             QPointF(right - cut, bottom), QPointF(left + cut, bottom),
+                             QPointF(left + cut, bottom - cut), QPointF(left, bottom - cut),
+                             QPointF(left, top + cut), QPointF(left + cut, top + cut)])
+        active = self.underMouse() or self.hasFocus()
+        painter.setBrush(QColor(TOKENS.focus_background if active else TOKENS.inset))
+        painter.setPen(QPen(QColor(TOKENS.gold_light if active else TOKENS.brass), 2 if self.hasFocus() else 1))
+        painter.drawPolygon(outline)
+        painter.setPen(QPen(QColor(TOKENS.border), 1))
+        painter.drawRect(frame.adjusted(4, 4, -4, -4))
+        center = frame.center()
+        x, y = center.x(), center.y()
+        arrows = {
+            Qt.ArrowType.LeftArrow: [(x + 3, y - 5), (x - 3, y), (x + 3, y + 5)],
+            Qt.ArrowType.RightArrow: [(x - 3, y - 5), (x + 3, y), (x - 3, y + 5)],
+            Qt.ArrowType.UpArrow: [(x - 5, y + 3), (x, y - 3), (x + 5, y + 3)],
+            Qt.ArrowType.DownArrow: [(x - 5, y - 3), (x, y + 3), (x + 5, y - 3)],
+        }
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(TOKENS.gold_light if active else TOKENS.gold))
+        painter.drawPolygon(QPolygonF([QPointF(*point) for point in arrows[self.arrowType()]]))
+        painter.setPen(QPen(QColor(TOKENS.brass), 1))
+        if self.horizontal:
+            for end in (top + 14, bottom - 14):
+                painter.drawLine(QPointF(x - 5, end), QPointF(x + 5, end))
+        else:
+            for end in (left + 14, right - 14):
+                painter.drawLine(QPointF(end, y - 5), QPointF(end, y + 5))
+
+
 class DecoInspectionDock(QScrollArea):
-    """Prefer a readable inspector height; yield space in smaller windows."""
+    """Scrollable inspection content whose height is controlled by its splitter."""
     def __init__(self, content):
         super().__init__()
         self.setWidgetResizable(True)
         self.setWidget(content)
         self.setMinimumHeight(130)
-        self.setMaximumHeight(210)
         self.setAccessibleName('Channel colors and inspection panels')
 
     def sizeHint(self):

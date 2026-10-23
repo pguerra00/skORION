@@ -211,7 +211,8 @@ class GuiTests(unittest.TestCase):
         window = OrionWindow()
         self.addCleanup(window.close)
         self.assertFalse(window.coloc_enabled.isChecked())
-        self.assertTrue(window.coloc_container.isHidden())
+        self.assertFalse(window.coloc_container.isHidden())
+        self.assertFalse(window.coloc_container.isEnabled())
         self.assertEqual([window.coloc_a.currentData(), window.coloc_b.currentData()], [2, 3])
         window.coloc_enabled.setChecked(True)
         self.assertFalse(window.coloc_container.isHidden())
@@ -252,7 +253,8 @@ class GuiTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 window.collect_parameters()
             window.coloc_enabled.setChecked(False)
-            self.assertTrue(window.coloc_container.isHidden())
+            self.assertFalse(window.coloc_container.isHidden())
+            self.assertFalse(window.coloc_container.isEnabled())
             self.assertFalse(window.collect_parameters()['colocalization']['enabled'])
             snapshot = root / 'analysis_parameters.json'
             snapshot.write_text(json.dumps(p), encoding='utf-8')

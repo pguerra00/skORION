@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 import warnings
+from html.parser import HTMLParser
 
 import numpy as np
 import pandas as pd
@@ -156,6 +157,8 @@ class ImageReviewTests(unittest.TestCase):
 
     def test_html_filenames_flags_and_unchanged_links(self):
         mapping,images,p=self.fixture([1,2,3,4,50]);p['nuclear_channel']=1
+        images.loc[0,'C2_mean_focus_area_um2']=np.nan
+        images['C2_percent_focus_positive_nuclei']=0
         mapping.loc[4,'image_name']='true <outlier> & sample.tif'
         cells=pd.DataFrame(columns=['image_id','nucleus_id']);focus=pd.DataFrame(columns=['channel'])
         qc=pd.DataFrame([dict(image_id='I05',channel=2,number_usable_nuclei=10,number_excluded_nuclei=0,
@@ -172,6 +175,31 @@ class ImageReviewTests(unittest.TestCase):
             self.assertIn('1 flagged for review',text)
             self.assertNotIn('<h3>I05',text)
             self.assertIn('Representative_Images.png',text)
+            self.assertLess(text.index('<h2>Inspect every image'),text.index('id="flagged-image-review"'))
+            self.assertLess(text.index('id="flagged-image-review"'),text.index('id="qc-findings"'))
+            self.assertTrue(text.endswith('</details></body></html>'))
+            class DetailsParser(HTMLParser):
+                def __init__(self):super().__init__();self.stack=[];self.nodes={};self.assessment_rows=0
+                def handle_starttag(self,tag,attrs):
+                    attrs=dict(attrs)
+                    if tag=='details':
+                        key=attrs.get('id','anonymous')
+                        self.nodes[key]=(attrs,self.stack[-1] if self.stack else None)
+                        self.stack.append(key)
+                    if tag=='tr' and 'full-outlier-assessment' in self.stack:self.assessment_rows+=1
+                def handle_endtag(self,tag):
+                    if tag=='details':self.stack.pop()
+            parsed=DetailsParser();parsed.feed(text)
+            for key in ['flagged-image-review','full-outlier-assessment','qc-findings']:
+                self.assertNotIn('open',parsed.nodes[key][0])
+            self.assertEqual(parsed.nodes['full-outlier-assessment'][1],'flagged-image-review')
+            self.assertIsNone(parsed.nodes['qc-findings'][1])
+            self.assertEqual(parsed.assessment_rows,21)  # Four endpoints × five images, plus header.
+            for column in ['Finite images','Q1','Q3','Lower fence','Upper fence','Status']:
+                self.assertIn(column,text)
+            self.assertIn('assessed',text)
+            for status in ['missing value','insufficient images','zero IQR']:
+                self.assertIn(status,text)
 
 
 if __name__=='__main__':unittest.main()

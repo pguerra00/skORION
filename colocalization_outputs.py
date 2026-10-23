@@ -96,8 +96,11 @@ Focus properties compare area, original mean intensity, local-corrected mean and
 local-corrected integrated intensity, reusing the original focus measurements.
 Treatment boxplots show image observations with equal image weight, median/IQR,
 1.5-IQR whiskers and individual image points. ECDFs pool focus/pair observations
-within treatments and are descriptive distributions. Partner-count bars show
-pooled focus fractions for zero, one, two and three-or-more partners.
+within treatments and are descriptive distributions. Partner-count probability
+lines show the fraction of foci at each actual nonnegative integer partner count,
+including zero and counts above three, independently normalized within each
+treatment and marker direction. Both panels share an integer count axis; no
+continuous density smoothing is applied.
 
 Counts remain zero when no foci/pairs exist. Empty-denominator fractions,
 empty-category means, unavailable nearest neighbors and constant-input Pearson
@@ -169,6 +172,27 @@ def definition(column):
     if column in ('mean_centroid_distance_um', 'median_centroid_distance_um'):
         return 'Mean or median calibrated distance over qualifying pair rows, giving every relationship equal weight.'
     return None
+
+
+def partner_count_lines(ax,objects,role,groups,colors,maximum):
+    """Discrete probability mass, pooled per focus within each treatment/role."""
+    x=np.arange(maximum+1)
+    for group,color in zip(groups,colors):
+        values=pd.to_numeric(objects.loc[(objects.marker_role==role)&
+                              (objects.treatment_group==group),'partner_count'],errors='coerce').to_numpy(float)
+        counts=values[np.isfinite(values)&(values>=0)&(values==np.floor(values))].astype(int)
+        if not len(counts):continue
+        frequencies=np.bincount(counts,minlength=maximum+1)/len(counts)
+        ax.plot(x,frequencies,color=color,label=group,lw=1.8,
+                marker='o' if np.unique(counts).size==1 else None,markersize=3)
+    from matplotlib.ticker import MaxNLocator
+    if maximum==0:ax.set_xticks([0])
+    else:ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+    ax.set(xlabel=f'{role}: number of opposite-channel partners',ylabel='Fraction of foci',
+           xlim=(-.25,maximum+.25),ylim=(0,1.05))
+    ax.grid(alpha=.15)
+    if ax.lines:ax.legend(fontsize=7)
+    else:ax.text(.5,.5,'No defined observations',transform=ax.transAxes,ha='center')
 
 
 def make_figures(out, mapping, parameters, tables, groups, colors, progress=None):
@@ -265,17 +289,11 @@ def make_figures(out, mapping, parameters, tables, groups, colors, progress=None
     save(fig, 'Coverage_Distances')
 
     fig, axs = plt.subplots(1, 2, figsize=(13, 5), layout='constrained')
+    partner_values=pd.to_numeric(objects['partner_count'],errors='coerce').to_numpy(float)
+    partner_values=partner_values[np.isfinite(partner_values)&(partner_values>=0)&(partner_values==np.floor(partner_values))]
+    maximum=int(partner_values.max()) if len(partner_values) else 0
     for ax, role in zip(axs, ('A', 'B')):
-        for j, (group, color) in enumerate(zip(groups, colors)):
-            counts = objects.loc[(objects.marker_role == role) & (objects.treatment_group == group), 'partner_count'].to_numpy(int)
-            if len(counts):
-                frequencies = np.bincount(np.minimum(counts, 3), minlength=4) / len(counts)
-                width = .8 / max(len(groups), 1)
-                ax.bar(np.arange(4) - .4 + width * (j + .5), frequencies, width, color=color, label=group)
-        ax.set_xticks(range(4), ['0', '1', '2', '3+'])
-        ax.set(xlabel=f'{role}: number of opposite-channel partners', ylabel='Fraction of foci', ylim=(0, 1.05))
-        if ax.patches:
-            ax.legend(fontsize=7)
+        partner_count_lines(ax,objects,role,groups,colors,maximum)
     save(fig, 'Partner_Counts')
 
     fig, axs = plt.subplots(1, 3, figsize=(16, 5), layout='constrained')
@@ -346,11 +364,13 @@ def report_section(out, parameters, tables):
     body += 'Corrected Pearson retains negative values. Positive corrected signal is used for directional Manders coefficients. '
     body += 'Mask Jaccard and Manders use complete accepted masks independently of the association threshold. '
     body += 'Zero counts are retained; undefined measurements are missing with reasons in status columns. No statistical tests are performed.</p>'
+    body += '<p>Partner-count lines show the fraction of foci at each actual integer count, including zero and counts above three. '
+    body += 'Each treatment is normalized independently within each marker direction. The two panels share the count axis; no continuous smoothing is applied.</p>'
     for filename, title in FIGURES.items():
         body += f'<article><h3>{esc(title)}</h3><img loading="lazy" src="Plots/Colocalization/{filename}.png" alt="{esc(title)}">'
         body += f'<p><a href="Plots/Colocalization/{filename}.png">PNG</a> · <a href="Plots/Colocalization/{filename}.svg">Editable SVG</a></p></article>'
     body += '<p>Coverage/distance ECDFs pool focus or relationship observations within each treatment. '
-    body += 'Partner bars include zero-partner foci; exact counts remain in the focus CSV. '
+    body += 'Partner probability lines include zero-partner foci; exact counts remain in the focus CSV. '
     body += 'Nearest opposite-channel distance includes non-colocalized foci and does not establish an association.</p>'
     body += '<details><summary>Inspect colocalization in every image</summary><div class="gallery">'
     for _, row in images.iterrows():

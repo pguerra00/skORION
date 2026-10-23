@@ -297,7 +297,12 @@ def make_experiment_summary(out,mapping,image,cell,focus,p,progress=None):
     print('Rendering experiment summary...',flush=True)
     channels=p['foci_channels'];paired=len(channels)==2
     rng=np.random.default_rng(p['random_seed_for_plot_jitter'])
-    legend_labels=[textwrap.fill(str(label),40) for label in LABELS]
+    legend_labels=[]
+    for group,label in zip(GROUPS,LABELS):
+        images=image[image.treatment_group==group];nuclei=cell[cell.treatment_group==group]
+        image_count=images.image_id.nunique()
+        nucleus_count=nuclei.nucleus_id.nunique() if 'nucleus_id' in nuclei else len(nuclei)
+        legend_labels.append(textwrap.fill(str(label),40)+f'\n{image_count:,} images · {nucleus_count:,} nuclei')
     legend_lines=max((label.count('\n')+1 for label in legend_labels),default=1)
     header_height=1.2+.3*math.ceil(len(GROUPS)/4)*legend_lines
     heights=[header_height]+[8]*len(channels)+([5] if paired else [])
@@ -355,7 +360,7 @@ def make_experiment_summary(out,mapping,image,cell,focus,p,progress=None):
                 else:ax.text(.5,.5,'No measurements',transform=ax.transAxes,ha='center',va='center')
                 if log and any_positive:ax.set_xscale('log')
         if paired:
-            ax=blocks[-1].subplots();first,second=channels;valid_count=0
+            ax=blocks[-1].subplots();first,second=channels;valid_count=0;undefined_fits=[]
             for j,g in enumerate(GROUPS):
                 rows=cell[cell.treatment_group==g]
                 x=pd.to_numeric(rows[f'C{first}_foci_count'],errors='coerce').to_numpy(float)
@@ -363,13 +368,26 @@ def make_experiment_summary(out,mapping,image,cell,focus,p,progress=None):
                 valid=np.isfinite(x)&np.isfinite(y);valid_count+=int(valid.sum())
                 if valid.any():ax.scatter(x[valid],y[valid],s=SCATTER_SIZE,alpha=.3,
                                           color=COLORS[j],edgecolors='none',rasterized=True)
+                xv,yv=x[valid],y[valid]
+                if len(xv)>=2 and np.ptp(xv)>0:
+                    dx=xv-xv.mean()
+                    slope=np.dot(dx,yv-yv.mean())/np.dot(dx,dx)
+                    intercept=yv.mean()-slope*xv.mean()
+                    fit_x=np.array([xv.min(),xv.max()])
+                    ax.plot(fit_x,intercept+slope*fit_x,color=COLORS[j],lw=1.8,zorder=4)
+                else:undefined_fits.append(str(LABELS[j]))
             ax.set_title('Foci counts across channels · one point per nucleus',fontsize=14)
             ax.set_xlabel(f'C{first} {marker_name(p,first)} · foci per nucleus')
             ax.set_ylabel(f'C{second} {marker_name(p,second)} · foci per nucleus')
             ax.set_xlim(left=0);ax.set_ylim(bottom=0);ax.grid(alpha=.15)
             if not valid_count:ax.text(.5,.5,'No measurements',transform=ax.transAxes,ha='center',va='center')
+            if undefined_fits:
+                note='No trend fit (fewer than two finite pairs or constant X): '+', '.join(undefined_fits)
+                ax.text(.01,.98,textwrap.fill(note,110),transform=ax.transAxes,va='top',fontsize=8,
+                        bbox={'facecolor':'white','edgecolor':'none','alpha':.85})
         caption=('Endpoint boxes: image-level median and IQR; whiskers: within 1.5 × IQR. Faint endpoint points: individual images.\n'
                  'ECDF counts use individual nuclei; area and intensity ECDFs use individual foci. Nuclei and foci are nested within images; descriptive comparisons only.')
+        if paired:caption+='\nSolid treatment lines: ordinary least-squares trends over observed counts; no confidence bands or significance tests.'
         if rgb:caption+='\nRGB intensities are stored color-component values, not recovered detector ADU.'
         fig.supxlabel(caption,fontsize=9)
         figsave(fig,out,'Experiment_Summary')
@@ -725,7 +743,7 @@ The experimental structure is focus -> nucleus -> image -> treatment. The report
 
 Image_Level_Endpoints and Focus_Positive_Nuclei use saved image-level measurements, grouped by combined treatment_group. Boxes show the median and interquartile range (IQR); whiskers extend to the most extreme observations within 1.5 times the IQR of the quartiles. Separate outlier symbols are hidden because every valid image appears once per metric as a circular point (size 8 points squared, alpha 0.25), with reproducible horizontal jitter within ±0.16 of its treatment position. Points have no image ID, count or percentage annotations. Missing and nonfinite values are omitted per metric while their treatment categories remain visible. A single-image group has a collapsed box and one point. Treatment labels are rotated 45 degrees and right aligned; the separate focus-positive percentage axis spans 0–110%.
 
-Experiment_Summary.png and Experiment_Summary.svg combine four saved image-level endpoints and three ECDFs per selected foci channel. ECDFs use all finite nucleus counts (including zero-focus nuclei), individual focus areas, and individual focus mean raw intensities. Area and intensity ECDF axes are logarithmic when positive observations exist. Exactly two selected foci channels add a scatter of their paired counts from each usable nucleus row, colored by combined treatment_group; zero counts are retained and pairs with nonfinite counts are omitted. The scatter is descriptive, without fitted lines, correlation statistics, or significance tests. Summary generation uses saved tables without reading raw images or repeating segmentation.
+Experiment_Summary.png and Experiment_Summary.svg combine four saved image-level endpoints and three ECDFs per selected foci channel. ECDFs use all finite nucleus counts (including zero-focus nuclei), individual focus areas, and individual focus mean raw intensities. Area and intensity ECDF axes are logarithmic when positive observations exist. Exactly two selected foci channels add a scatter of their paired counts from each usable nucleus row, colored by combined treatment_group; zero counts are retained and pairs with nonfinite counts are omitted. Ordinary least-squares lines summarize each treatment over its observed X range, requiring at least two finite pairs with distinct X values. Undefined fits are noted; no confidence bands, correlation statistics, or significance tests are added. The top legend counts all image observations and accepted nuclei per treatment, independently of finite scatter pairs. Summary generation uses saved tables without reading raw images or repeating segmentation.
 
 Representative_Images.png and Representative_Images.svg show up to two eligible full-field images per combined treatment, using the same images for all selected channels. Selection uses the four image-level endpoints in the experiment summary for every selected foci channel. Each metric's arithmetic mean and sample standard deviation include all finite image values, including outliers; metrics with fewer than two values or zero standard deviation are ignored. Eligible images are ordered by the number of available usable metrics (descending), then root-mean-square standardized distance from the group means (ascending), then original filename and internal ID. Images without usable nuclei, images flagged as within-treatment outliers, and images with no usable endpoint values are ineligible. All-constant metrics give equal distances and deterministic filename ties. Partial-metric selections and missing representative slots are identified explicitly. Methods/Representative_Image_Selection.csv records scores, coverage, ranks, eligibility, selections, and group means/scales.
 
@@ -787,21 +805,32 @@ body{font:16px/1.55 system-ui,Arial;color:#203043;background:#f7f9fb;max-width:1
     body+='<p class="links"><a href="Methods/Methods.md">Detailed methods</a><a href="Methods/Output_Parameters.json">Report parameters</a><a href="Methods/Treatment_Group_Mapping.csv">Image mapping</a><a href="QC/QC_Summary.csv">QC summary CSV</a></p>'
     body+=summary.to_html(index=False,float_format=lambda x:f'{x:,.2f}',border=0)
     body+=f'<p>Nuclear segmentation: {esc(nuclear)}. Marker labels come from the analysis configuration. Border nuclei are excluded; focus-negative nuclei remain in summaries. Per-image calibration is recorded in the image mapping.</p>'
-    body+='<h2>QC findings</h2><p>Flags identify inspection targets and never exclude images. Full reasons, thresholds and sensitivity counts are in the QC table.</p>'
+    qc_footer='<details id="qc-findings" class="treatment-images"><summary>QC Findings</summary><p>Flags identify inspection targets and never exclude images. Full reasons, thresholds and sensitivity counts are in the QC table.</p>'
     qc_display=qc[['image_id','channel','number_usable_nuclei','number_excluded_nuclei','manual_inspection_warnings']].copy()
     qc_display['image_id']=qc_display.image_id.map(names).fillna(qc_display.image_id)
-    body+=qc_display.rename(columns={'image_id':'Image'}).to_html(index=False,border=0)
-    body+=f'<p class="note"><strong>{len(flagged_ids)} image(s) flagged for within-treatment outlier review.</strong> Flags use 1.5 × IQR fences with at least five finite images and positive IQR per endpoint. Flagged images remain in all measurement summaries and graphs; they are ineligible as representatives.</p>'
+    qc_footer+=qc_display.rename(columns={'image_id':'Image'}).to_html(index=False,border=0)+'</details>'
+    review_footer=f'<details id="flagged-image-review" class="treatment-images"><summary>Flagged image review · {len(flagged_ids)} image(s)</summary>'
+    review_footer+=f'<p class="note"><strong>{len(flagged_ids)} image(s) flagged for within-treatment outlier review.</strong> Flags use 1.5 × IQR fences with at least five finite images and positive IQR per endpoint. Flagged images remain in all measurement summaries and graphs; they are ineligible as representatives.</p>'
     assessed=int((outliers.assessment_status=='assessed').sum()) if len(outliers) else 0
-    if not assessed:body+='<p>No endpoints could be assessed for outliers: groups had insufficient finite values or zero IQR. This does not establish that the images are free of outliers.</p>'
-    body+='<p><a href="QC/Image_Outlier_Review.csv">Full outlier assessment, including unassessed endpoints</a></p>'
+    if not assessed:review_footer+='<p>No endpoints could be assessed for outliers: groups had insufficient finite values or zero IQR. This does not establish that the images are free of outliers.</p>'
+    review_footer+='<p><a href="QC/Image_Outlier_Review.csv">Full outlier assessment, including unassessed endpoints (CSV)</a></p>'
     if len(flagged):
         rows=[]
         for _,r in flagged.iterrows():
             rows.append({'Image':f'<a href="QC/{esc(r.image_id)}_Annotated_QC.png">{esc(names.get(r.image_id,r.image_name))}</a>',
                          'Treatment':esc(r.treatment_group),'Channel':int(r.channel),'Endpoint':esc(r.metric),
                          'Observed':f'{r.value:.5g}','Lower fence':f'{r.lower_fence:.5g}','Upper fence':f'{r.upper_fence:.5g}'})
-        body+='<details><summary>Review flagged images and reasons</summary>'+pd.DataFrame(rows).to_html(index=False,border=0,escape=False)+'</details>'
+        review_footer+='<details><summary>Review flagged images and reasons</summary><div style="overflow-x:auto">'+pd.DataFrame(rows).to_html(index=False,border=0,escape=False)+'</div></details>'
+    assessment_columns=['image_name','treatment_group','channel','metric','value','finite_images',
+                        'q1','q3','lower_fence','upper_fence','assessment_status','outlier']
+    full_assessment=outliers.reindex(columns=assessment_columns).copy()
+    if len(outliers):full_assessment['image_name']=outliers.image_id.map(names).fillna(full_assessment.image_name)
+    full_assessment=full_assessment.rename(columns={'image_name':'Image','treatment_group':'Treatment',
+        'channel':'Channel','metric':'Endpoint','value':'Observed','finite_images':'Finite images',
+        'q1':'Q1','q3':'Q3','lower_fence':'Lower fence','upper_fence':'Upper fence',
+        'assessment_status':'Status','outlier':'Flagged'})
+    review_footer+='<details id="full-outlier-assessment"><summary>Full outlier assessment</summary>'
+    review_footer+='<div style="overflow-x:auto">'+full_assessment.to_html(index=False,border=0,na_rep='—',float_format=lambda v:f'{v:.5g}')+'</div></details></details>'
     body+='<h2>Treatment comparisons within each channel</h2>'
     for c in p['foci_channels']:
         body+=f'<article><h3>Channel {c} · '+esc(marker_name(p,c))+'</h3>'
@@ -851,7 +880,7 @@ body{font:16px/1.55 system-ui,Arial;color:#203043;background:#f7f9fb;max-width:1
                 body+='</div></details>'
             body+='</article>'
         body+='</details>'
-    body+='</body></html>'
+    body+=review_footer+qc_footer+'</body></html>'
     (out/'Review.html').write_text(body, encoding='utf-8')
     lines=['# Foci analysis report','',f'Processed {len(mapping)} images; {len(cell)} nuclei analyzed.',
            f'Nuclear channel: {nuclear}.',totals,'',
